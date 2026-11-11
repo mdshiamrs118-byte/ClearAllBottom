@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Clear All Bottom</string>
+    <string name="xposed_desc">Moves the Recents "Clear all" button to the bottom of the screen</string>
+</resources>
