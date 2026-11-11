@@ -1,6 +1,7 @@
 package com.example.clearallbottom;
 
 import android.graphics.Canvas;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 
@@ -20,7 +21,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 public class Hook implements IXposedHookLoadPackage {
 
     // Distance (dp) between the button's bottom edge and the bottom of the Recents view.
-    private static final int BOTTOM_OFFSET_DP = 96;
+    private static final int BOTTOM_OFFSET_DP = 72;
 
     private static final String TAG = "ClearAllBottom: ";
     private static final String RV = "com.android.quickstep.views.RecentsView";
@@ -54,6 +55,7 @@ public class Hook implements IXposedHookLoadPackage {
         // dispatchDraw: place before, and draw the button ourselves after
         // (PagedView only draws pages that are in the visible range).
         hookDraw(recentsView);
+        hookTouch();
 
         Class<?> clearAll = XposedHelpers.findClassIfExists(
                 "com.android.quickstep.views.ClearAllButton", lpparam.classLoader);
@@ -75,6 +77,62 @@ public class Hook implements IXposedHookLoadPackage {
             hookChain(clearAll, "setVisibilityAlpha", buttonFix);
             hookChain(clearAll, "setTranslationX", buttonFix);
             hookChain(clearAll, "setTranslationY", buttonFix);
+        }
+    }
+
+    private static boolean tracking = false;
+
+    /**
+     * The button is drawn away from its layout position, so route taps on its visible
+     * area to it ourselves instead of relying on the launcher's hit-testing.
+     */
+    private static void hookTouch() {
+        try {
+            XposedHelpers.findAndHookMethod(ViewGroup.class, "dispatchTouchEvent",
+                    MotionEvent.class, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        if (!isRecentsView(param.thisObject.getClass())) return;
+                        ViewGroup rv = (ViewGroup) param.thisObject;
+                        View b = findButton(rv);
+                        if (b == null || b.getVisibility() != View.VISIBLE) return;
+                        MotionEvent ev = (MotionEvent) param.args[0];
+                        int action = ev.getActionMasked();
+
+                        float pad = 8 * rv.getResources().getDisplayMetrics().density;
+                        float l = b.getX() - rv.getScrollX() - pad;
+                        float t = b.getY() - pad;
+                        float r = l + b.getWidth() + 2 * pad;
+                        float bt = t + b.getHeight() + 2 * pad;
+                        boolean inside = ev.getX() >= l && ev.getX() <= r
+                                && ev.getY() >= t && ev.getY() <= bt;
+
+                        if (action == MotionEvent.ACTION_DOWN) {
+                            tracking = inside;
+                            if (tracking) {
+                                b.setPressed(true);
+                                param.setResult(true);
+                            }
+                        } else if (tracking) {
+                            if (action == MotionEvent.ACTION_UP) {
+                                tracking = false;
+                                b.setPressed(false);
+                                if (inside) b.performClick();
+                            } else if (action == MotionEvent.ACTION_CANCEL) {
+                                tracking = false;
+                                b.setPressed(false);
+                            }
+                            param.setResult(true);
+                        }
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + "touch: " + t);
+                    }
+                }
+            });
+            XposedBridge.log(TAG + "touch hooked");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "hookTouch: " + t);
         }
     }
 
