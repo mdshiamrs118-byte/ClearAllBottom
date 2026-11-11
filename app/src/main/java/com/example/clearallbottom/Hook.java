@@ -1,7 +1,10 @@
 package com.example.clearallbottom;
 
+import android.graphics.Canvas;
 import android.view.View;
 import android.view.ViewGroup;
+
+import java.lang.reflect.Method;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -10,22 +13,26 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 /**
- * Moves the Quickstep Recents "Clear all" button to the bottom of RecentsView.
+ * Pins the Quickstep Recents "Clear all" button to the bottom-center of RecentsView,
+ * keeps it fully visible at all times, and draws it even when the launcher
+ * would normally skip its (off-screen) page.
  */
 public class Hook implements IXposedHookLoadPackage {
 
     // Distance (dp) between the button's bottom edge and the bottom of the Recents view.
-    // Increase this if the button overlaps the Screenshot/Select actions row.
     private static final int BOTTOM_OFFSET_DP = 96;
 
     private static final String TAG = "ClearAllBottom: ";
+    private static final String RV = "com.android.quickstep.views.RecentsView";
+
+    private static boolean placing = false;
+    private static boolean drawing = false;
 
     @Override
     public void handleLoadPackage(LoadPackageParam lpparam) {
-        final Class<?> recentsView = XposedHelpers.findClassIfExists(
-                "com.android.quickstep.views.RecentsView", lpparam.classLoader);
+        final Class<?> recentsView = XposedHelpers.findClassIfExists(RV, lpparam.classLoader);
         if (recentsView == null) {
-            return; // not a Quickstep launcher process
+            return;
         }
         XposedBridge.log(TAG + "RecentsView found in " + lpparam.packageName);
 
@@ -40,14 +47,14 @@ public class Hook implements IXposedHookLoadPackage {
                 apply(param.thisObject);
             }
         };
-
-        // Re-apply on layout, scroll and draw so the framework can't reset it.
         hookChain(recentsView, "onLayout", fix);
-        hookChain(recentsView, "dispatchDraw", fix);
         hookChain(recentsView, "onPageScroll", fix);
         hookChain(recentsView, "updateClearAllButtonAlpha", fix);
 
-        // Also hook the button itself if the class exists.
+        // dispatchDraw: place before, and draw the button ourselves after
+        // (PagedView only draws pages that are in the visible range).
+        hookDraw(recentsView);
+
         Class<?> clearAll = XposedHelpers.findClassIfExists(
                 "com.android.quickstep.views.ClearAllButton", lpparam.classLoader);
         if (clearAll != null) {
@@ -63,8 +70,50 @@ public class Hook implements IXposedHookLoadPackage {
             hookChain(clearAll, "onLayout", buttonFix);
             hookChain(clearAll, "onRecentsViewScroll", buttonFix);
             hookChain(clearAll, "onPageScroll", buttonFix);
+            hookChain(clearAll, "updateAlpha", buttonFix);
+            hookChain(clearAll, "setContentAlpha", buttonFix);
+            hookChain(clearAll, "setVisibilityAlpha", buttonFix);
             hookChain(clearAll, "setTranslationX", buttonFix);
             hookChain(clearAll, "setTranslationY", buttonFix);
+        }
+    }
+
+    private static void hookDraw(Class<?> recentsView) {
+        for (Class<?> c = recentsView; c != null && c != ViewGroup.class; c = c.getSuperclass()) {
+            try {
+                Method m = c.getDeclaredMethod("dispatchDraw", Canvas.class);
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (isRecentsView(param.thisObject.getClass())) apply(param.thisObject);
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (!isRecentsView(param.thisObject.getClass()) || drawing) return;
+                        drawing = true;
+                        try {
+                            ViewGroup rv = (ViewGroup) param.thisObject;
+                            View b = findButton(rv);
+                            if (b != null && b.getVisibility() == View.VISIBLE) {
+                                Canvas canvas = (Canvas) param.args[0];
+                                XposedHelpers.callMethod(rv, "drawChild", canvas, b,
+                                        rv.getDrawingTime());
+                            }
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + "draw: " + t);
+                        } finally {
+                            drawing = false;
+                        }
+                    }
+                });
+                XposedBridge.log(TAG + "draw hooked in " + c.getName());
+                return; // most-derived declaration only
+            } catch (NoSuchMethodException ignored) {
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + "hookDraw: " + t);
+                return;
+            }
         }
     }
 
@@ -80,44 +129,50 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
+    private static boolean isRecentsView(Class<?> c) {
+        for (; c != null; c = c.getSuperclass()) {
+            if (c.getName().equals(RV)) return true;
+        }
+        return false;
+    }
+
+    private static View findButton(ViewGroup rv) {
+        for (int i = 0; i < rv.getChildCount(); i++) {
+            View child = rv.getChildAt(i);
+            if (child.getClass().getName().endsWith("ClearAllButton")) return child;
+        }
+        return null;
+    }
+
     private static void apply(Object thiz) {
         try {
-            if (!thiz.getClass().getName().contains("RecentsView")
-                    && !isRecentsView(thiz.getClass())) {
-                return; // PagedView hooks also fire for Workspace etc.
-            }
+            if (!isRecentsView(thiz.getClass())) return;
             ViewGroup rv = (ViewGroup) thiz;
-            for (int i = 0; i < rv.getChildCount(); i++) {
-                View child = rv.getChildAt(i);
-                if (child.getClass().getName().endsWith("ClearAllButton")) {
-                    place(rv, child);
-                    return;
-                }
-            }
+            View b = findButton(rv);
+            if (b != null) place(rv, b);
         } catch (Throwable t) {
             XposedBridge.log(TAG + t);
         }
     }
 
-    private static boolean isRecentsView(Class<?> c) {
-        for (; c != null; c = c.getSuperclass()) {
-            if (c.getName().equals("com.android.quickstep.views.RecentsView")) return true;
-        }
-        return false;
-    }
-
-    private static boolean placing = false;
-
     private static void place(ViewGroup rv, View button) {
-        if (placing || rv.getHeight() == 0 || button.getHeight() == 0) return;
+        if (placing || rv.getWidth() == 0 || rv.getHeight() == 0 || button.getHeight() == 0) return;
         placing = true;
         try {
             float density = rv.getResources().getDisplayMetrics().density;
-            float target = rv.getHeight() - BOTTOM_OFFSET_DP * density
+
+            // Bottom, a bit above the bottom edge.
+            float ty = rv.getHeight() - BOTTOM_OFFSET_DP * density
                     - button.getHeight() - button.getTop();
-            if (Math.abs(button.getTranslationY() - target) > 0.5f) {
-                button.setTranslationY(target);
-            }
+            if (Math.abs(button.getTranslationY() - ty) > 0.5f) button.setTranslationY(ty);
+
+            // Horizontally centered on screen, cancelling the RecentsView scroll.
+            float tx = rv.getScrollX() + rv.getWidth() / 2f
+                    - button.getLeft() - button.getWidth() / 2f;
+            if (Math.abs(button.getTranslationX() - tx) > 0.5f) button.setTranslationX(tx);
+
+            // Always visible.
+            if (button.getAlpha() != 1f) button.setAlpha(1f);
         } finally {
             placing = false;
         }
