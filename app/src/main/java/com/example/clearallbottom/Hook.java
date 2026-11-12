@@ -1,12 +1,15 @@
 package com.example.clearallbottom;
 
 import android.graphics.Canvas;
+import android.graphics.Matrix;
 import android.graphics.Outline;
 import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
+import android.view.ViewTreeObserver;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -103,6 +106,10 @@ public class Hook implements IXposedHookLoadPackage {
     private static boolean tracking = false;
     private static boolean pinnedApplied = false;
     private static Method drawChildMethod;
+    private static float downX, downY;
+    private static boolean tapActive, tapMoved;
+    private static View downTarget;
+    private static final WeakHashMap<ViewGroup, ViewTreeObserver> OBSERVERS = new WeakHashMap<>();
 
     /** Per-card record of what we last wrote, so we build on top of the launcher's own values. */
     private static final WeakHashMap<View, float[]> STATE = new WeakHashMap<>();
@@ -506,7 +513,68 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
-    /** The Clear all button is drawn away from its layout spot, so route its taps ourselves. */
+    /** Topmost visible card under (x, y), using each card's real (transformed) bounds. */
+    private static View cardAt(ViewGroup rv, float x, float y) {
+        List<View> order = buildOrder(rv, false);
+        for (int i = order.size() - 1; i >= 0; i--) {
+            View c = order.get(i);
+            if (!c.getClass().getName().endsWith("TaskView")) continue;
+            if (c.getVisibility() != View.VISIBLE || skipped.contains(c)) continue;
+            float[] pt = {x + rv.getScrollX() - c.getLeft(), y + rv.getScrollY() - c.getTop()};
+            Matrix m = c.getMatrix();
+            if (!m.isIdentity()) {
+                Matrix inv = new Matrix();
+                if (m.invert(inv)) inv.mapPoints(pt);
+            }
+            if (pt[0] >= 0 && pt[0] <= c.getWidth() && pt[1] >= 0 && pt[1] <= c.getHeight()) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    /** Taps on the pinned Clear all button. Returns true if the event was consumed. */
+    private static boolean handleButtonTouch(ViewGroup rv, MotionEvent ev,
+                                             XC_MethodHook.MethodHookParam param) {
+        if (!pinClear) return false;
+        View b = findButton(rv);
+        if (b == null || b.getVisibility() != View.VISIBLE) return false;
+        int action = ev.getActionMasked();
+
+        float pad = 8 * rv.getResources().getDisplayMetrics().density;
+        float l = b.getX() - rv.getScrollX() - pad;
+        float top = b.getY() - pad;
+        float r = l + b.getWidth() + 2 * pad;
+        float bottom = top + b.getHeight() + 2 * pad;
+        boolean inside = ev.getX() >= l && ev.getX() <= r
+                && ev.getY() >= top && ev.getY() <= bottom;
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            tracking = inside;
+            if (tracking) {
+                b.setPressed(true);
+                param.setResult(true);
+                return true;
+            }
+        } else if (tracking) {
+            if (action == MotionEvent.ACTION_UP) {
+                tracking = false;
+                b.setPressed(false);
+                if (inside) b.performClick();
+            } else if (action == MotionEvent.ACTION_CANCEL) {
+                tracking = false;
+                b.setPressed(false);
+            }
+            param.setResult(true);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Handles taps on the Clear all button, and makes card taps follow the cards' VISIBLE
+     * (resized / moved) areas only: a tap is resolved by us and the stock handling is cancelled.
+     */
     private static void hookButtonTouch() {
         try {
             XposedHelpers.findAndHookMethod(ViewGroup.class, "dispatchTouchEvent",
@@ -514,47 +582,92 @@ public class Hook implements IXposedHookLoadPackage {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
                     try {
-                        if (!pinClear || !isRecentsView(param.thisObject.getClass())) return;
+                        if (!isRecentsView(param.thisObject.getClass())) return;
                         ViewGroup rv = (ViewGroup) param.thisObject;
-                        View b = findButton(rv);
-                        if (b == null || b.getVisibility() != View.VISIBLE) return;
                         MotionEvent ev = (MotionEvent) param.args[0];
+                        if (handleButtonTouch(rv, ev, param)) return;
+                        if (style == Prefs.STYLE_ORIGINAL) return;
+
                         int action = ev.getActionMasked();
-
-                        float pad = 8 * rv.getResources().getDisplayMetrics().density;
-                        float l = b.getX() - rv.getScrollX() - pad;
-                        float top = b.getY() - pad;
-                        float r = l + b.getWidth() + 2 * pad;
-                        float bottom = top + b.getHeight() + 2 * pad;
-                        boolean inside = ev.getX() >= l && ev.getX() <= r
-                                && ev.getY() >= top && ev.getY() <= bottom;
-
+                        float slop = ViewConfiguration.get(rv.getContext()).getScaledTouchSlop();
                         if (action == MotionEvent.ACTION_DOWN) {
-                            tracking = inside;
-                            if (tracking) {
-                                b.setPressed(true);
-                                param.setResult(true);
-                            }
-                        } else if (tracking) {
-                            if (action == MotionEvent.ACTION_UP) {
-                                tracking = false;
-                                b.setPressed(false);
-                                if (inside) b.performClick();
+                            downX = ev.getX();
+                            downY = ev.getY();
+                            tapMoved = false;
+                            tapActive = true;
+                            downTarget = cardAt(rv, downX, downY);
+                        } else if (tapActive) {
+                            if (action == MotionEvent.ACTION_MOVE) {
+                                if (Math.hypot(ev.getX() - downX, ev.getY() - downY) > slop) {
+                                    tapMoved = true;
+                                }
+                            } else if (action == MotionEvent.ACTION_POINTER_DOWN) {
+                                tapMoved = true;
                             } else if (action == MotionEvent.ACTION_CANCEL) {
-                                tracking = false;
-                                b.setPressed(false);
+                                tapActive = false;
+                            } else if (action == MotionEvent.ACTION_UP) {
+                                tapActive = false;
+                                if (!tapMoved) {
+                                    // A tap: stock code must not decide what it hit.
+                                    MotionEvent cancel = MotionEvent.obtain(ev);
+                                    cancel.setAction(MotionEvent.ACTION_CANCEL);
+                                    param.args[0] = cancel;
+                                    View target = downTarget;
+                                    if (target != null
+                                            && cardAt(rv, ev.getX(), ev.getY()) == target) {
+                                        param.setObjectExtra("tapCard", target);
+                                    }
+                                }
+                                downTarget = null;
                             }
-                            param.setResult(true);
                         }
                     } catch (Throwable t) {
                         XposedBridge.log(TAG + "touch: " + t);
                     }
                 }
+
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Object card = param.getObjectExtra("tapCard");
+                        if (card instanceof View) ((View) card).performClick();
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + "tap click: " + t);
+                    }
+                }
             });
-            XposedBridge.log(TAG + "button touch hooked");
+            XposedBridge.log(TAG + "touch hooked");
         } catch (Throwable t) {
             XposedBridge.log(TAG + "hookButtonTouch: " + t);
         }
+    }
+
+    /**
+     * The launcher animates card properties (e.g. after a swipe-up dismiss) without
+     * re-running dispatchDraw, which would briefly show the stock look. Re-apply our
+     * transforms right before every frame so that never happens.
+     */
+    private static void ensurePreDraw(final ViewGroup rv) {
+        ViewTreeObserver vto = rv.getViewTreeObserver();
+        if (vto == null || !vto.isAlive() || OBSERVERS.get(rv) == vto) return;
+        OBSERVERS.put(rv, vto);
+        vto.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override
+            public boolean onPreDraw() {
+                try {
+                    if (style != Prefs.STYLE_ORIGINAL && rv.isAttachedToWindow()
+                            && rv.getVisibility() == View.VISIBLE && rv.getAlpha() > 0f) {
+                        refreshCfg();
+                        buildOrder(rv, true);
+                        View b = findButton(rv);
+                        if (b != null) place(rv, b);
+                    }
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + "preDraw: " + t);
+                }
+                return true;
+            }
+        });
     }
 
     // ---------------- helpers ----------------
@@ -589,6 +702,7 @@ public class Hook implements IXposedHookLoadPackage {
             if (!isRecentsView(thiz.getClass())) return;
             refreshCfg();
             ViewGroup rv = (ViewGroup) thiz;
+            ensurePreDraw(rv);
             View b = findButton(rv);
             if (b != null) place(rv, b);
         } catch (Throwable t) {
