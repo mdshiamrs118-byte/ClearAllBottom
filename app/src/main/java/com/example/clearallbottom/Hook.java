@@ -19,6 +19,8 @@ import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
+import android.view.WindowInsets;
+import android.widget.FrameLayout;
 import android.widget.TextView;
 
 import java.lang.reflect.Method;
@@ -86,6 +88,14 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile boolean iconPopup = Prefs.D_ICON_POPUP;
     private static volatile boolean transOn = Prefs.D_TRANS_ON;
     private static volatile int transMs = Prefs.D_TRANS_MS;
+    private static volatile boolean ramOn = Prefs.D_RAM_ON;
+    private static volatile boolean ramBottom = Prefs.D_RAM_BOTTOM;
+    private static volatile int ramOffset = Prefs.D_RAM_OFFSET;
+    private static volatile int ramOpacity = Prefs.D_RAM_OPACITY;
+    private static volatile boolean ramSwap = Prefs.D_RAM_SWAP;
+    private static RamView ramView;
+    private static boolean ramTicking;
+    private static int ramVersion = -1;
     private static long rvShownAt = 0L;
     private static boolean lastShown = false;
     private static boolean animating = false;
@@ -166,6 +176,11 @@ public class Hook implements IXposedHookLoadPackage {
         iconPopup = xp.getBoolean(Prefs.K_ICON_POPUP, Prefs.D_ICON_POPUP);
         transOn = xp.getBoolean(Prefs.K_TRANS_ON, Prefs.D_TRANS_ON);
         transMs = xp.getInt(Prefs.K_TRANS_MS, Prefs.D_TRANS_MS);
+        ramOn = xp.getBoolean(Prefs.K_RAM_ON, Prefs.D_RAM_ON);
+        ramBottom = xp.getBoolean(Prefs.K_RAM_BOTTOM, Prefs.D_RAM_BOTTOM);
+        ramOffset = xp.getInt(Prefs.K_RAM_OFFSET, Prefs.D_RAM_OFFSET);
+        ramOpacity = xp.getInt(Prefs.K_RAM_OPACITY, Prefs.D_RAM_OPACITY);
+        ramSwap = xp.getBoolean(Prefs.K_RAM_SWAP, Prefs.D_RAM_SWAP);
         cfgVersion++;
         clearBottomDp = xp.getInt(Prefs.K_CLEAR_BOTTOM, Prefs.D_CLEAR_BOTTOM);
     }
@@ -809,6 +824,7 @@ public class Hook implements IXposedHookLoadPackage {
                     if (shown && !lastShown) rvShownAt = SystemClock.uptimeMillis();
                     if (!shown && lastShown) RecentsPopup.dismiss();
                     lastShown = shown;
+                    syncRam(rv, shown);
                     if (style != Prefs.STYLE_ORIGINAL && shown) {
                         refreshCfg();
                         buildOrder(rv, true);
@@ -850,6 +866,65 @@ public class Hook implements IXposedHookLoadPackage {
         } finally {
             sizing = false;
         }
+    }
+
+    // ---------------- RAM card ----------------
+    /** Keeps the RAM card in the launcher window, visible only while Recents is. */
+    private static void syncRam(final ViewGroup rv, boolean shown) {
+        try {
+            if (!ramOn) {
+                if (ramView != null) ramView.setVisibility(View.GONE);
+                return;
+            }
+            View rootV = rv.getRootView();
+            if (!(rootV instanceof FrameLayout)) return;
+            FrameLayout root = (FrameLayout) rootV;
+            float d = rv.getResources().getDisplayMetrics().density;
+            if (ramView == null || ramView.getParent() != root) {
+                if (ramView != null && ramView.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) ramView.getParent()).removeView(ramView);
+                }
+                ramView = new RamView(rv.getContext());
+                root.addView(ramView, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                ramVersion = -1;
+            }
+            if (ramVersion != cfgVersion) {
+                ramVersion = cfgVersion;
+                ramView.configure(ramOpacity, ramSwap);
+                WindowInsets wi = rv.getRootWindowInsets();
+                int topInset = wi != null ? wi.getSystemWindowInsetTop() : Math.round(24 * d);
+                int bottomInset = wi != null ? wi.getSystemWindowInsetBottom() : 0;
+                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) ramView.getLayoutParams();
+                lp.gravity = (ramBottom ? Gravity.BOTTOM : Gravity.TOP) | Gravity.CENTER_HORIZONTAL;
+                lp.topMargin = ramBottom ? 0 : topInset + Math.round(ramOffset * d);
+                lp.bottomMargin = ramBottom ? bottomInset + Math.round(ramOffset * d) : 0;
+                ramView.setLayoutParams(lp);
+            }
+            ramView.setVisibility(shown ? View.VISIBLE : View.INVISIBLE);
+            ramView.setAlpha(rv.getAlpha());
+            if (shown && !ramTicking) {
+                ramTicking = true;
+                ramView.refresh();
+                scheduleRamTick(rv);
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "ram: " + t);
+        }
+    }
+
+    private static void scheduleRamTick(final ViewGroup rv) {
+        rv.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (ramOn && lastShown && ramView != null) {
+                    ramView.refresh();
+                    rv.postDelayed(this, 1000);
+                } else {
+                    ramTicking = false;
+                }
+            }
+        }, 1000);
     }
 
     // ---------------- icon popup helpers ----------------

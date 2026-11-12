@@ -61,6 +61,7 @@ public class MainActivity extends Activity {
     private SharedPreferences sp;
     private boolean shared = true;
     private TextView previewBtn;
+    private RamView ramPreview;
     private SharedPreferences meta;
     private Spinner presetSpinner;
     private final List<String> presetNames = new ArrayList<>();
@@ -218,11 +219,28 @@ public class MainActivity extends Activity {
             @Override
             public void onSharedPreferenceChanged(SharedPreferences p, String key) {
                 refreshPreview();
+                refreshRamPreview();
             }
         };
         sp.registerOnSharedPreferenceChangeListener(prefListener);
 
         buildRootSection(root);
+
+        // ----- RAM info -----
+        heading(root, "RAM info on Recents");
+        toggle(root, Prefs.K_RAM_ON, "Show RAM used / free / total", Prefs.D_RAM_ON);
+        ramPreview = new RamView(this);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rlp.gravity = Gravity.CENTER_HORIZONTAL;
+        rlp.topMargin = dp(8);
+        rlp.bottomMargin = dp(8);
+        root.addView(ramPreview, rlp);
+        toggle(root, Prefs.K_RAM_BOTTOM, "Show at the bottom instead of the top", Prefs.D_RAM_BOTTOM);
+        slider(root, Prefs.K_RAM_OFFSET, "Distance from the edge", 0, 200, Prefs.D_RAM_OFFSET, " dp", null);
+        slider(root, Prefs.K_RAM_OPACITY, "Card opacity", 10, 100, Prefs.D_RAM_OPACITY, "%", null);
+        toggle(root, Prefs.K_RAM_SWAP, "Also show swap / zram", Prefs.D_RAM_SWAP);
+        refreshRamPreview();
 
         // ----- Actions -----
         Button restart = new Button(this);
@@ -379,6 +397,20 @@ public class MainActivity extends Activity {
         if (hgt > 0) tv.setHeight(dp(hgt)); else { tv.setHeight(0); tv.setMinHeight(0); }
         tv.setGravity(Gravity.CENTER);
         tv.setElevation(dp(sp.getInt(Prefs.K_BTN_SHADOW, Prefs.D_BTN_SHADOW)));
+    }
+
+    private void refreshRamPreview() {
+        if (ramPreview == null) return;
+        ramPreview.configure(sp.getInt(Prefs.K_RAM_OPACITY, Prefs.D_RAM_OPACITY),
+                sp.getBoolean(Prefs.K_RAM_SWAP, Prefs.D_RAM_SWAP));
+        ramPreview.setVisibility(sp.getBoolean(Prefs.K_RAM_ON, Prefs.D_RAM_ON)
+                ? View.VISIBLE : View.GONE);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (ramPreview != null) ramPreview.refresh();
     }
 
     private void textRow(LinearLayout parent, final String key, String label) {
