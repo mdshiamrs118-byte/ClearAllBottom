@@ -18,6 +18,7 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
+import android.view.ViewParent;
 import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
 import android.widget.FrameLayout;
@@ -29,6 +30,8 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
@@ -85,6 +88,10 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile boolean rootOn = Prefs.D_ROOT_ON;
     private static volatile String token = null;
     private static boolean clearHookOk = false;
+    private static long lastClearAt = 0L;
+    private static boolean lastClearHandled = false;
+    /** Locks changed from the popup in this launcher session (pkg -> locked). */
+    private static final Map<String, Boolean> OVERRIDES = new ConcurrentHashMap<>();
     private static volatile boolean iconPopup = Prefs.D_ICON_POPUP;
     private static volatile boolean transOn = Prefs.D_TRANS_ON;
     private static volatile int transMs = Prefs.D_TRANS_MS;
@@ -171,6 +178,9 @@ public class Hook implements IXposedHookLoadPackage {
             for (String s : prot.split(",")) if (s.trim().length() > 0) ps.add(s.trim());
         }
         protectedSet = ps;
+        for (Map.Entry<String, Boolean> e : new ArrayList<>(OVERRIDES.entrySet())) {
+            if (ps.contains(e.getKey()) == e.getValue().booleanValue()) OVERRIDES.remove(e.getKey());
+        }
         rootOn = xp.getBoolean(Prefs.K_ROOT_ON, Prefs.D_ROOT_ON);
         token = xp.getString(Prefs.K_TOKEN, null);
         iconPopup = xp.getBoolean(Prefs.K_ICON_POPUP, Prefs.D_ICON_POPUP);
@@ -974,18 +984,26 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     static boolean isLocked(String pkg) {
-        return protectedSet.contains(pkg);
+        Boolean o = OVERRIDES.get(pkg);
+        return o != null ? o.booleanValue() : protectedSet.contains(pkg);
+    }
+
+    /** Protected list as the launcher currently sees it (file + changes made this session). */
+    private static Set<String> effectiveProtected() {
+        Set<String> s = new HashSet<>(protectedSet);
+        for (Map.Entry<String, Boolean> e : OVERRIDES.entrySet()) {
+            if (e.getValue().booleanValue()) s.add(e.getKey());
+            else s.remove(e.getKey());
+        }
+        return s;
     }
 
     /** Locks/unlocks an app (adds/removes it from the protected list). Null if it can't be saved. */
     static Boolean toggleLock(Context ctx, String pkg) {
         String tk = token;
         if (tk == null) return null;
-        Set<String> cur = new HashSet<>(protectedSet);
-        boolean lock = !cur.contains(pkg);
-        if (lock) cur.add(pkg);
-        else cur.remove(pkg);
-        protectedSet = cur;
+        boolean lock = !isLocked(pkg);
+        OVERRIDES.put(pkg, lock);
         try {
             Intent i = new Intent(Prefs.ACTION_LOCK);
             i.setClassName(Prefs.PKG, Prefs.PKG + ".CleanReceiver");
@@ -1011,6 +1029,8 @@ public class Hook implements IXposedHookLoadPackage {
                     if (handleClearAll((ViewGroup) param.thisObject)) param.setResult(null);
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + "clearAll: " + t);
+                    // never let a failure wipe locked apps
+                    if (!effectiveProtected().isEmpty()) param.setResult(null);
                 }
             }
         };
@@ -1025,6 +1045,30 @@ public class Hook implements IXposedHookLoadPackage {
         }
         clearHookOk = n > 0;
         XposedBridge.log(TAG + "dismissAllTasks hooks: " + n);
+
+        // Name-independent: catch the Clear all button's click itself.
+        try {
+            XposedHelpers.findAndHookMethod(View.class, "performClick", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    Object t = param.thisObject;
+                    if (!t.getClass().getName().endsWith("ClearAllButton")) return;
+                    ViewParent p = ((View) t).getParent();
+                    if (!(p instanceof ViewGroup) || !isRecentsView(p.getClass())) return;
+                    try {
+                        refreshCfg();
+                        if (handleClearAll((ViewGroup) p)) param.setResult(true);
+                    } catch (Throwable e) {
+                        XposedBridge.log(TAG + "clearAll click: " + e);
+                        if (!effectiveProtected().isEmpty()) param.setResult(true);
+                    }
+                }
+            });
+            clearHookOk = true;
+            XposedBridge.log(TAG + "Clear all click hooked");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "click hook: " + t);
+        }
     }
 
     /** {packageName, taskId} of a card, or null if unreadable. */
@@ -1046,7 +1090,11 @@ public class Hook implements IXposedHookLoadPackage {
      * stock "clear everything" should go ahead.
      */
     private static boolean handleClearAll(ViewGroup rv) {
-        Set<String> prot = protectedSet;
+        long nowMs = SystemClock.uptimeMillis();
+        if (nowMs - lastClearAt < 700L) return lastClearHandled; // same tap seen by two hooks
+        lastClearAt = nowMs;
+        lastClearHandled = false;
+        Set<String> prot = effectiveProtected();
         if (prot.isEmpty() && !rootOn) return false;
 
         List<View> cards = new ArrayList<>();
@@ -1076,6 +1124,8 @@ public class Hook implements IXposedHookLoadPackage {
         }
 
         Context ctx = rv.getContext();
+        XposedBridge.log(TAG + "clearAll: locked=" + prot.size() + " cards=" + cards.size()
+                + " removing=" + removeViews.size() + " keepingLocked=" + anyProtected);
         if (!anyProtected) {
             sendClean(ctx, pkgs);
             return false; // nothing protected on screen: stock clear-all removes everything
@@ -1107,6 +1157,7 @@ public class Hook implements IXposedHookLoadPackage {
             }
         }
         sendClean(ctx, pkgs);
+        lastClearHandled = true;
         return true;
     }
 

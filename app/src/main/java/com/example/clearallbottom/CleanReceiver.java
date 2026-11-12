@@ -23,7 +23,7 @@ public class CleanReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context ctx, Intent in) {
         if (in == null || in.getAction() == null) return;
-        SharedPreferences sp = ctx.getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE);
+        SharedPreferences sp = open(ctx);
         String token = sp.getString(Prefs.K_TOKEN, null);
         if (token == null || !token.equals(in.getStringExtra("token"))) return;
 
@@ -79,6 +79,16 @@ public class CleanReceiver extends BroadcastReceiver {
                 }
             }
         }).start();
+    }
+
+    /** Same mode as the settings app, so the launcher keeps being able to read the file. */
+    @SuppressWarnings({"deprecation", "WorldReadableFiles"})
+    private static SharedPreferences open(Context ctx) {
+        try {
+            return ctx.getSharedPreferences(Prefs.NAME, Context.MODE_WORLD_READABLE);
+        } catch (SecurityException e) {
+            return ctx.getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE);
+        }
     }
 
     private static boolean isNever(String pkg) {
