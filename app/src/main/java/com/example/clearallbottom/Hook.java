@@ -1,16 +1,24 @@
 package com.example.clearallbottom;
 
 import android.content.Intent;
+import android.content.res.ColorStateList;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.Outline;
+import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.os.SystemClock;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
+import android.widget.TextView;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -54,6 +62,20 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile boolean pinClear = Prefs.D_PIN;
     private static volatile boolean flatTilt = Prefs.D_FLAT;
     private static volatile boolean tapHome = Prefs.D_TAP_HOME;
+    private static volatile boolean btnOn = Prefs.D_BTN_ON;
+    private static volatile String btnText = Prefs.D_BTN_TEXT;
+    private static volatile int btnTextColor = Prefs.D_BTN_TEXT_COLOR;
+    private static volatile int btnTextSize = Prefs.D_BTN_TEXT_SIZE;
+    private static volatile boolean btnBold = Prefs.D_BTN_BOLD;
+    private static volatile int btnBg = Prefs.D_BTN_BG;
+    private static volatile int btnRadius = Prefs.D_BTN_RADIUS;
+    private static volatile int btnW = Prefs.D_BTN_W;
+    private static volatile int btnH = Prefs.D_BTN_H;
+    private static volatile int btnPadX = Prefs.D_BTN_PADX;
+    private static volatile int btnStroke = Prefs.D_BTN_STROKE;
+    private static volatile int btnStrokeColor = Prefs.D_BTN_STROKE_COLOR;
+    private static volatile int btnShadow = Prefs.D_BTN_SHADOW;
+    private static volatile int cfgVersion = 0;
     private static volatile int clearBottomDp = Prefs.D_CLEAR_BOTTOM;
 
     private static XSharedPreferences xp;
@@ -103,6 +125,21 @@ public class Hook implements IXposedHookLoadPackage {
         pinClear = xp.getBoolean(Prefs.K_PIN, Prefs.D_PIN);
         flatTilt = xp.getBoolean(Prefs.K_FLAT, Prefs.D_FLAT);
         tapHome = xp.getBoolean(Prefs.K_TAP_HOME, Prefs.D_TAP_HOME);
+        btnOn = xp.getBoolean(Prefs.K_BTN_ON, Prefs.D_BTN_ON);
+        String bt = xp.getString(Prefs.K_BTN_TEXT, Prefs.D_BTN_TEXT);
+        btnText = bt == null ? "" : bt;
+        btnTextColor = xp.getInt(Prefs.K_BTN_TEXT_COLOR, Prefs.D_BTN_TEXT_COLOR);
+        btnTextSize = xp.getInt(Prefs.K_BTN_TEXT_SIZE, Prefs.D_BTN_TEXT_SIZE);
+        btnBold = xp.getBoolean(Prefs.K_BTN_BOLD, Prefs.D_BTN_BOLD);
+        btnBg = xp.getInt(Prefs.K_BTN_BG, Prefs.D_BTN_BG);
+        btnRadius = xp.getInt(Prefs.K_BTN_RADIUS, Prefs.D_BTN_RADIUS);
+        btnW = xp.getInt(Prefs.K_BTN_W, Prefs.D_BTN_W);
+        btnH = xp.getInt(Prefs.K_BTN_H, Prefs.D_BTN_H);
+        btnPadX = xp.getInt(Prefs.K_BTN_PADX, Prefs.D_BTN_PADX);
+        btnStroke = xp.getInt(Prefs.K_BTN_STROKE, Prefs.D_BTN_STROKE);
+        btnStrokeColor = xp.getInt(Prefs.K_BTN_STROKE_COLOR, Prefs.D_BTN_STROKE_COLOR);
+        btnShadow = xp.getInt(Prefs.K_BTN_SHADOW, Prefs.D_BTN_SHADOW);
+        cfgVersion++;
         clearBottomDp = xp.getInt(Prefs.K_CLEAR_BOTTOM, Prefs.D_CLEAR_BOTTOM);
     }
 
@@ -114,6 +151,9 @@ public class Hook implements IXposedHookLoadPackage {
     private static float downX, downY;
     private static boolean tapActive, tapMoved;
     private static View downTarget;
+    /** Original look of the Clear all button, and which settings version we last applied. */
+    private static final WeakHashMap<View, Object[]> BTN_ORIG = new WeakHashMap<>();
+    private static final WeakHashMap<View, Integer> BTN_VER = new WeakHashMap<>();
     private static final Set<View> LAYERED =
             Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
     private static final WeakHashMap<ViewGroup, ViewTreeObserver> OBSERVERS = new WeakHashMap<>();
@@ -706,6 +746,74 @@ public class Hook implements IXposedHookLoadPackage {
         });
     }
 
+    // ---------------- Clear all button look ----------------
+    private static void styleButton(View v) {
+        if (!(v instanceof TextView)) return;
+        Integer applied = BTN_VER.get(v);
+        if (applied != null && applied == cfgVersion) return;
+        TextView tv = (TextView) v;
+        Object[] o = BTN_ORIG.get(v);
+        if (o == null) {
+            o = new Object[]{tv.getBackground(), tv.getText(), tv.getTextColors(),
+                    tv.getTextSize(), tv.getTypeface(),
+                    tv.getPaddingLeft(), tv.getPaddingTop(), tv.getPaddingRight(),
+                    tv.getPaddingBottom(), tv.getElevation(),
+                    tv.getMinWidth(), tv.getMaxWidth(), tv.getMinHeight(), tv.getMaxHeight(),
+                    tv.getMinimumWidth(), tv.getMinimumHeight(), tv.getGravity()};
+            BTN_ORIG.put(v, o);
+        }
+        float d = tv.getResources().getDisplayMetrics().density;
+
+        // start from the original look every time, then layer our settings on top
+        tv.setBackground((Drawable) o[0]);
+        tv.setText((CharSequence) o[1]);
+        tv.setTextColor((ColorStateList) o[2]);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_PX, (Float) o[3]);
+        tv.setTypeface((Typeface) o[4]);
+        tv.setPadding((Integer) o[5], (Integer) o[6], (Integer) o[7], (Integer) o[8]);
+        tv.setElevation((Float) o[9]);
+        tv.setMinWidth((Integer) o[10]);
+        tv.setMaxWidth((Integer) o[11]);
+        tv.setMinHeight((Integer) o[12]);
+        tv.setMaxHeight((Integer) o[13]);
+        tv.setMinimumWidth((Integer) o[14]);
+        tv.setMinimumHeight((Integer) o[15]);
+        tv.setGravity((Integer) o[16]);
+
+        if (btnOn) {
+            GradientDrawable gd = new GradientDrawable();
+            gd.setColor(btnBg);
+            gd.setCornerRadius(btnRadius * d);
+            if (btnStroke > 0) gd.setStroke(Math.round(btnStroke * d), btnStrokeColor);
+            tv.setBackground(new RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), gd, null));
+
+            tv.setTextColor(btnTextColor);
+            if (btnTextSize > 0) tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, btnTextSize);
+            tv.setTypeface((Typeface) o[4], btnBold ? Typeface.BOLD : Typeface.NORMAL);
+            if (btnText.length() > 0) tv.setText(btnText);
+
+            if (btnPadX > 0) {
+                int px = Math.round(btnPadX * d);
+                tv.setPadding(px, (Integer) o[6], px, (Integer) o[8]);
+            }
+            if (btnW > 0) {
+                int w = Math.round(btnW * d);
+                tv.setMinimumWidth(w);
+                tv.setWidth(w);
+            }
+            if (btnH > 0) {
+                int hh = Math.round(btnH * d);
+                tv.setMinimumHeight(hh);
+                tv.setHeight(hh);
+            }
+            tv.setGravity(Gravity.CENTER);
+            tv.setElevation(btnShadow * d);
+        }
+        BTN_VER.put(v, cfgVersion);
+        tv.requestLayout();
+        tv.invalidate();
+    }
+
     // ---------------- helpers ----------------
     private static void hookChain(Class<?> clazz, String name, XC_MethodHook hook) {
         for (Class<?> c = clazz; c != null && c != ViewGroup.class && c != View.class
@@ -748,6 +856,7 @@ public class Hook implements IXposedHookLoadPackage {
 
     private static void place(ViewGroup rv, View button) {
         if (placing) return;
+        styleButton(button);
         if (!pinClear) {
             if (pinnedApplied) {
                 pinnedApplied = false;

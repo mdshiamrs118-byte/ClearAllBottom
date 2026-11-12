@@ -26,6 +26,19 @@ public final class Prefs {
     public static final String K_INVERT = "invert_tilt";
     public static final String K_FLAT = "flat_tilt";
     public static final String K_TAP_HOME = "tap_home";
+    public static final String K_BTN_ON = "btn_custom";
+    public static final String K_BTN_TEXT = "btn_text";
+    public static final String K_BTN_TEXT_COLOR = "btn_text_color";
+    public static final String K_BTN_TEXT_SIZE = "btn_text_size";
+    public static final String K_BTN_BOLD = "btn_bold";
+    public static final String K_BTN_BG = "btn_bg";
+    public static final String K_BTN_RADIUS = "btn_radius";
+    public static final String K_BTN_W = "btn_w";
+    public static final String K_BTN_H = "btn_h";
+    public static final String K_BTN_PADX = "btn_padx";
+    public static final String K_BTN_STROKE = "btn_stroke";
+    public static final String K_BTN_STROKE_COLOR = "btn_stroke_color";
+    public static final String K_BTN_SHADOW = "btn_shadow";
     public static final String K_PIN = "pin_clear_all";
     public static final String K_CLEAR_BOTTOM = "clear_bottom_dp";
 
@@ -43,6 +56,19 @@ public final class Prefs {
     public static final boolean D_INVERT = false;
     public static final boolean D_FLAT = false;
     public static final boolean D_TAP_HOME = true;
+    public static final boolean D_BTN_ON = true;
+    public static final String D_BTN_TEXT = "";            // empty = launcher's own label
+    public static final int D_BTN_TEXT_COLOR = 0xFFFFFFFF;
+    public static final int D_BTN_TEXT_SIZE = 14;          // sp, 0 = stock
+    public static final boolean D_BTN_BOLD = true;
+    public static final int D_BTN_BG = 0xCC202020;
+    public static final int D_BTN_RADIUS = 24;             // dp
+    public static final int D_BTN_W = 0;                   // dp, 0 = auto
+    public static final int D_BTN_H = 44;                  // dp, 0 = auto
+    public static final int D_BTN_PADX = 24;               // dp, 0 = stock
+    public static final int D_BTN_STROKE = 0;              // dp
+    public static final int D_BTN_STROKE_COLOR = 0x66FFFFFF;
+    public static final int D_BTN_SHADOW = 4;              // dp
     public static final boolean D_PIN = true;
     public static final int D_CLEAR_BOTTOM = 72;
 }
