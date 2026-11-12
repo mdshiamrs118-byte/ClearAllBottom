@@ -39,6 +39,13 @@ public final class Prefs {
     public static final String K_BTN_STROKE = "btn_stroke";
     public static final String K_BTN_STROKE_COLOR = "btn_stroke_color";
     public static final String K_BTN_SHADOW = "btn_shadow";
+    public static final String K_PROTECTED = "protected_pkgs";
+    public static final String K_ROOT_ON = "root_on";
+    public static final String K_ROOT_FORCE = "root_force_stop";
+    public static final String K_ROOT_KILLBG = "root_kill_bg";
+    public static final String K_ROOT_DROP = "root_drop_caches";
+    public static final String K_TOKEN = "token";
+    public static final String ACTION_CLEAN = "com.example.clearallbottom.CLEAN";
     public static final String K_PIN = "pin_clear_all";
     public static final String K_CLEAR_BOTTOM = "clear_bottom_dp";
 
@@ -69,6 +76,16 @@ public final class Prefs {
     public static final int D_BTN_STROKE = 0;              // dp
     public static final int D_BTN_STROKE_COLOR = 0x66FFFFFF;
     public static final int D_BTN_SHADOW = 4;              // dp
+    public static final boolean D_ROOT_ON = false;
+    public static final boolean D_ROOT_FORCE = true;
+    public static final boolean D_ROOT_KILLBG = false;
+    public static final boolean D_ROOT_DROP = false;
     public static final boolean D_PIN = true;
     public static final int D_CLEAR_BOTTOM = 72;
+
+    /** Keys that belong to the app itself, not to a look: never saved in / changed by presets. */
+    public static boolean isGlobalKey(String k) {
+        return K_PROTECTED.equals(k) || K_ROOT_ON.equals(k) || K_ROOT_FORCE.equals(k)
+                || K_ROOT_KILLBG.equals(k) || K_ROOT_DROP.equals(k) || K_TOKEN.equals(k);
+    }
 }

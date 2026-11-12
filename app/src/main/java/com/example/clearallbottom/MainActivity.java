@@ -2,6 +2,10 @@ package com.example.clearallbottom;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -19,12 +23,33 @@ import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
+import android.widget.ArrayAdapter;
 import android.widget.RadioGroup;
+import android.widget.Spinner;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 
 public class MainActivity extends Activity {
 
@@ -36,6 +61,12 @@ public class MainActivity extends Activity {
     private SharedPreferences sp;
     private boolean shared = true;
     private TextView previewBtn;
+    private SharedPreferences meta;
+    private Spinner presetSpinner;
+    private final List<String> presetNames = new ArrayList<>();
+    private static final int REQ_EXPORT = 41;
+    private static final int REQ_IMPORT = 42;
+    private static final String[] BUILTIN = {"Stock", "Stack", "Cover flow", "iPhone style"};
     private SharedPreferences.OnSharedPreferenceChangeListener prefListener;
 
     @SuppressWarnings({"deprecation", "WorldReadableFiles"})
@@ -56,6 +87,10 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         sp = openPrefs();
+        meta = getSharedPreferences("meta", MODE_PRIVATE);
+        if (sp.getString(Prefs.K_TOKEN, null) == null) {
+            sp.edit().putString(Prefs.K_TOKEN, UUID.randomUUID().toString()).apply();
+        }
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -92,6 +127,8 @@ public class MainActivity extends Activity {
             warn.setPadding(0, 0, 0, dp(10));
             root.addView(warn);
         }
+
+        buildPresetSection(root);
 
         // ----- Style -----
         heading(root, "Recents style");
@@ -180,6 +217,8 @@ public class MainActivity extends Activity {
         };
         sp.registerOnSharedPreferenceChangeListener(prefListener);
 
+        buildRootSection(root);
+
         // ----- Actions -----
         Button restart = new Button(this);
         restart.setText("Restart launcher (root)");
@@ -206,7 +245,11 @@ public class MainActivity extends Activity {
         reset.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                sp.edit().clear().apply();
+                SharedPreferences.Editor ed = sp.edit();
+                for (String k : new ArrayList<>(sp.getAll().keySet())) {
+                    if (!Prefs.isGlobalKey(k)) ed.remove(k);
+                }
+                ed.apply();
                 recreate();
             }
         });
@@ -499,5 +542,401 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    // ================================================================ presets
+    private void buildPresetSection(LinearLayout root) {
+        heading(root, "Presets");
+        presetSpinner = new Spinner(this);
+        refreshPresetList(null);
+        root.addView(presetSpinner);
+
+        LinearLayout row1 = new LinearLayout(this);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        row1.addView(smallButton("Load", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                loadSelectedPreset();
+            }
+        }));
+        row1.addView(smallButton("Save as...", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                saveCurrentAsPreset();
+            }
+        }));
+        row1.addView(smallButton("Delete", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                deleteSelectedPreset();
+            }
+        }));
+        root.addView(row1);
+
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        row2.addView(smallButton("Export", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("application/json");
+                i.putExtra(Intent.EXTRA_TITLE, "recents-styler-presets.json");
+                startActivityForResult(i, REQ_EXPORT);
+            }
+        }));
+        row2.addView(smallButton("Import", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("*/*");
+                startActivityForResult(i, REQ_IMPORT);
+            }
+        }));
+        root.addView(row2);
+    }
+
+    private Button smallButton(String text, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setOnClickListener(l);
+        b.setLayoutParams(new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        return b;
+    }
+
+    private JSONObject loadPresets() {
+        try {
+            return new JSONObject(meta.getString("presets", "{}"));
+        } catch (JSONException e) {
+            return new JSONObject();
+        }
+    }
+
+    private void storePresets(JSONObject o) {
+        meta.edit().putString("presets", o.toString()).apply();
+    }
+
+    private boolean isBuiltin(String name) {
+        for (String b : BUILTIN) if (b.equals(name)) return true;
+        return false;
+    }
+
+    private JSONObject builtinPreset(String name) throws JSONException {
+        JSONObject o = new JSONObject();
+        if ("Stock".equals(name)) {
+            o.put(Prefs.K_STYLE, Prefs.STYLE_ORIGINAL);
+        } else if ("Stack".equals(name)) {
+            o.put(Prefs.K_STYLE, Prefs.STYLE_STACK);
+        } else if ("Cover flow".equals(name)) {
+            o.put(Prefs.K_STYLE, Prefs.STYLE_COVERFLOW);
+            o.put(Prefs.K_SPACING, 40);
+            o.put(Prefs.K_SHRINK, 10);
+            o.put(Prefs.K_TILT, 45);
+        } else if ("iPhone style".equals(name)) {
+            o.put(Prefs.K_STYLE, Prefs.STYLE_IPHONE);
+            o.put(Prefs.K_SPACING, 40);
+            o.put(Prefs.K_SHRINK, 5);
+        }
+        return o;
+    }
+
+    private void refreshPresetList(String select) {
+        presetNames.clear();
+        for (String b : BUILTIN) presetNames.add(b);
+        List<String> saved = new ArrayList<>();
+        Iterator<String> it = loadPresets().keys();
+        while (it.hasNext()) saved.add(it.next());
+        Collections.sort(saved, new Comparator<String>() {
+            @Override
+            public int compare(String a, String b) {
+                return a.compareToIgnoreCase(b);
+            }
+        });
+        presetNames.addAll(saved);
+        ArrayAdapter<String> ad = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, presetNames);
+        ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        presetSpinner.setAdapter(ad);
+        if (select != null) {
+            int idx = presetNames.indexOf(select);
+            if (idx >= 0) presetSpinner.setSelection(idx);
+        }
+    }
+
+    private String selectedPreset() {
+        int pos = presetSpinner.getSelectedItemPosition();
+        return pos >= 0 && pos < presetNames.size() ? presetNames.get(pos) : null;
+    }
+
+    private JSONObject snapshot() {
+        JSONObject o = new JSONObject();
+        for (Map.Entry<String, ?> e : sp.getAll().entrySet()) {
+            if (Prefs.isGlobalKey(e.getKey())) continue;
+            Object v = e.getValue();
+            if (v instanceof Integer || v instanceof Boolean || v instanceof String) {
+                try {
+                    o.put(e.getKey(), v);
+                } catch (JSONException ignored) {
+                }
+            }
+        }
+        return o;
+    }
+
+    private void applyPreset(JSONObject o) {
+        SharedPreferences.Editor ed = sp.edit();
+        for (String k : new ArrayList<>(sp.getAll().keySet())) {
+            if (!Prefs.isGlobalKey(k)) ed.remove(k);
+        }
+        Iterator<String> it = o.keys();
+        while (it.hasNext()) {
+            String k = it.next();
+            if (Prefs.isGlobalKey(k)) continue;
+            Object v = o.opt(k);
+            if (v instanceof Integer) ed.putInt(k, (Integer) v);
+            else if (v instanceof Long) ed.putInt(k, (int) (long) (Long) v);
+            else if (v instanceof Boolean) ed.putBoolean(k, (Boolean) v);
+            else if (v instanceof String) ed.putString(k, (String) v);
+        }
+        ed.apply();
+        recreate();
+    }
+
+    private void loadSelectedPreset() {
+        String name = selectedPreset();
+        if (name == null) return;
+        try {
+            JSONObject o = isBuiltin(name) ? builtinPreset(name) : loadPresets().getJSONObject(name);
+            applyPreset(o);
+            Toast.makeText(this, "Loaded \"" + name + "\"", Toast.LENGTH_SHORT).show();
+        } catch (JSONException e) {
+            Toast.makeText(this, "Couldn't load that preset", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void saveCurrentAsPreset() {
+        final EditText et = new EditText(this);
+        et.setSingleLine(true);
+        et.setHint("Preset name");
+        new AlertDialog.Builder(this)
+                .setTitle("Save current settings as")
+                .setView(et)
+                .setPositiveButton("Save", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        String name = et.getText().toString().trim();
+                        if (name.length() == 0) return;
+                        if (isBuiltin(name)) {
+                            Toast.makeText(MainActivity.this, "That name is built in, pick another",
+                                    Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        try {
+                            JSONObject all = loadPresets();
+                            all.put(name, snapshot());
+                            storePresets(all);
+                            refreshPresetList(name);
+                            Toast.makeText(MainActivity.this, "Saved \"" + name + "\"",
+                                    Toast.LENGTH_SHORT).show();
+                        } catch (JSONException e) {
+                            Toast.makeText(MainActivity.this, "Couldn't save", Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void deleteSelectedPreset() {
+        String name = selectedPreset();
+        if (name == null) return;
+        if (isBuiltin(name)) {
+            Toast.makeText(this, "Built-in presets can't be deleted", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        JSONObject all = loadPresets();
+        all.remove(name);
+        storePresets(all);
+        refreshPresetList(null);
+        Toast.makeText(this, "Deleted \"" + name + "\"", Toast.LENGTH_SHORT).show();
+    }
+
+    @Override
+    protected void onActivityResult(int req, int result, Intent data) {
+        super.onActivityResult(req, result, data);
+        if (result != RESULT_OK || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
+        try {
+            if (req == REQ_EXPORT) {
+                JSONObject out = new JSONObject();
+                out.put("presets", loadPresets());
+                OutputStream os = getContentResolver().openOutputStream(uri);
+                if (os != null) {
+                    os.write(out.toString(2).getBytes("UTF-8"));
+                    os.close();
+                }
+                Toast.makeText(this, "Presets exported", Toast.LENGTH_SHORT).show();
+            } else if (req == REQ_IMPORT) {
+                InputStream is = getContentResolver().openInputStream(uri);
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                byte[] buf = new byte[4096];
+                int n;
+                while (is != null && (n = is.read(buf)) > 0) bos.write(buf, 0, n);
+                if (is != null) is.close();
+                JSONObject in = new JSONObject(bos.toString("UTF-8"));
+                JSONObject incoming = in.has("presets") ? in.getJSONObject("presets") : null;
+                JSONObject all = loadPresets();
+                int count = 0;
+                if (incoming != null) {
+                    Iterator<String> it = incoming.keys();
+                    while (it.hasNext()) {
+                        String k = it.next();
+                        if (isBuiltin(k)) continue;
+                        all.put(k, incoming.getJSONObject(k));
+                        count++;
+                    }
+                }
+                storePresets(all);
+                refreshPresetList(null);
+                Toast.makeText(this, "Imported " + count + " preset(s)", Toast.LENGTH_SHORT).show();
+            }
+        } catch (Exception e) {
+            Toast.makeText(this, "That didn't work: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    // ================================================================ root + protected apps
+    private void buildRootSection(LinearLayout root) {
+        heading(root, "Clear all actions (needs root)");
+        toggle(root, Prefs.K_ROOT_ON, "Root clean when clearing", Prefs.D_ROOT_ON);
+        toggle(root, Prefs.K_ROOT_FORCE, "Force-stop the apps that were cleared", Prefs.D_ROOT_FORCE);
+        toggle(root, Prefs.K_ROOT_KILLBG, "Kill all other background processes", Prefs.D_ROOT_KILLBG);
+        toggle(root, Prefs.K_ROOT_DROP, "Free cached memory (drop caches)", Prefs.D_ROOT_DROP);
+
+        final Button prot = new Button(this);
+        prot.setAllCaps(false);
+        setProtectedLabel(prot);
+        prot.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showProtectedDialog(prot);
+            }
+        });
+        root.addView(prot);
+
+        Button test = new Button(this);
+        test.setAllCaps(false);
+        test.setText("Test root access");
+        test.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                testRoot();
+            }
+        });
+        root.addView(test);
+
+        TextView note = new TextView(this);
+        note.setText("Protected apps stay in Recents when you tap Clear all and are never "
+                + "force-stopped. Swiping a protected card away still removes it.");
+        note.setTextColor(0xFF9E9E9E);
+        note.setTextSize(12);
+        note.setPadding(0, dp(6), 0, 0);
+        root.addView(note);
+    }
+
+    private Set<String> loadProtected() {
+        Set<String> s = new HashSet<>();
+        String raw = sp.getString(Prefs.K_PROTECTED, "");
+        if (raw != null) {
+            for (String p : raw.split(",")) if (p.trim().length() > 0) s.add(p.trim());
+        }
+        return s;
+    }
+
+    private void setProtectedLabel(Button b) {
+        b.setText("Protected apps (" + loadProtected().size() + ")");
+    }
+
+    private void showProtectedDialog(final Button label) {
+        PackageManager pm = getPackageManager();
+        final Map<String, String> labels = new HashMap<>();
+        final List<String> pkgs = new ArrayList<>();
+        for (ApplicationInfo ai : pm.getInstalledApplications(0)) {
+            if (ai.packageName.equals(getPackageName())) continue;
+            if (pm.getLaunchIntentForPackage(ai.packageName) == null) continue;
+            labels.put(ai.packageName, String.valueOf(pm.getApplicationLabel(ai)));
+            pkgs.add(ai.packageName);
+        }
+        Collections.sort(pkgs, new Comparator<String>() {
+            @Override
+            public int compare(String a, String b) {
+                return labels.get(a).compareToIgnoreCase(labels.get(b));
+            }
+        });
+
+        final Set<String> current = loadProtected();
+        final String[] names = new String[pkgs.size()];
+        final boolean[] checked = new boolean[pkgs.size()];
+        for (int i = 0; i < pkgs.size(); i++) {
+            String pkg = pkgs.get(i);
+            names[i] = labels.get(pkg) + "  (" + pkg + ")";
+            checked[i] = current.contains(pkg);
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Protected apps")
+                .setMultiChoiceItems(names, checked,
+                        new android.content.DialogInterface.OnMultiChoiceClickListener() {
+                            @Override
+                            public void onClick(android.content.DialogInterface d, int which,
+                                                boolean isChecked) {
+                                checked[which] = isChecked;
+                            }
+                        })
+                .setPositiveButton("OK", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        Set<String> result = new HashSet<>(current);
+                        result.removeAll(pkgs); // re-add the ones still checked below
+                        for (int i = 0; i < pkgs.size(); i++) if (checked[i]) result.add(pkgs.get(i));
+                        StringBuilder sb = new StringBuilder();
+                        for (String p : result) {
+                            if (sb.length() > 0) sb.append(',');
+                            sb.append(p);
+                        }
+                        sp.edit().putString(Prefs.K_PROTECTED, sb.toString()).apply();
+                        setProtectedLabel(label);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void testRoot() {
+        Toast.makeText(this, "Asking for root...", Toast.LENGTH_SHORT).show();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String res;
+                try {
+                    Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", "id"});
+                    BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                    String line = br.readLine();
+                    int code = p.waitFor();
+                    res = code == 0 ? "Root OK: " + line : "Root denied (exit " + code + ")";
+                } catch (Exception e) {
+                    res = "No root: " + e.getMessage();
+                }
+                final String msg = res;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        }).start();
     }
 }

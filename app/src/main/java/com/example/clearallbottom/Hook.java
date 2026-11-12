@@ -1,5 +1,6 @@
 package com.example.clearallbottom;
 
+import android.content.Context;
 import android.content.Intent;
 import android.content.res.ColorStateList;
 import android.graphics.Canvas;
@@ -22,6 +23,8 @@ import android.widget.TextView;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
@@ -76,6 +79,10 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile int btnStrokeColor = Prefs.D_BTN_STROKE_COLOR;
     private static volatile int btnShadow = Prefs.D_BTN_SHADOW;
     private static volatile int cfgVersion = 0;
+    private static volatile Set<String> protectedSet = new HashSet<>();
+    private static volatile boolean rootOn = Prefs.D_ROOT_ON;
+    private static volatile String token = null;
+    private static boolean clearHookOk = false;
     private static volatile int clearBottomDp = Prefs.D_CLEAR_BOTTOM;
 
     private static XSharedPreferences xp;
@@ -139,6 +146,14 @@ public class Hook implements IXposedHookLoadPackage {
         btnStroke = xp.getInt(Prefs.K_BTN_STROKE, Prefs.D_BTN_STROKE);
         btnStrokeColor = xp.getInt(Prefs.K_BTN_STROKE_COLOR, Prefs.D_BTN_STROKE_COLOR);
         btnShadow = xp.getInt(Prefs.K_BTN_SHADOW, Prefs.D_BTN_SHADOW);
+        String prot = xp.getString(Prefs.K_PROTECTED, "");
+        Set<String> ps = new HashSet<>();
+        if (prot != null) {
+            for (String s : prot.split(",")) if (s.trim().length() > 0) ps.add(s.trim());
+        }
+        protectedSet = ps;
+        rootOn = xp.getBoolean(Prefs.K_ROOT_ON, Prefs.D_ROOT_ON);
+        token = xp.getString(Prefs.K_TOKEN, null);
         cfgVersion++;
         clearBottomDp = xp.getInt(Prefs.K_CLEAR_BOTTOM, Prefs.D_CLEAR_BOTTOM);
     }
@@ -202,6 +217,7 @@ public class Hook implements IXposedHookLoadPackage {
         hookChain(recentsView, "updateClearAllButtonAlpha", fix);
 
         hookDraw(recentsView);
+        hookClearAll(recentsView);
         hookTouchOrder();
         hookButtonTouch();
 
@@ -629,7 +645,9 @@ public class Hook implements IXposedHookLoadPackage {
             if (action == MotionEvent.ACTION_UP) {
                 tracking = false;
                 b.setPressed(false);
-                if (inside) b.performClick();
+                if (inside) {
+                    if (!(!clearHookOk && handleClearAll(rv))) b.performClick();
+                }
             } else if (action == MotionEvent.ACTION_CANCEL) {
                 tracking = false;
                 b.setPressed(false);
@@ -772,6 +790,131 @@ public class Hook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + "enforceSize: " + t);
         } finally {
             sizing = false;
+        }
+    }
+
+    // ---------------- Clear all: protected apps + root clean ----------------
+    private static void hookClearAll(Class<?> recentsView) {
+        XC_MethodHook clearHook = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                if (!isRecentsView(param.thisObject.getClass())) return;
+                try {
+                    refreshCfg();
+                    if (handleClearAll((ViewGroup) param.thisObject)) param.setResult(null);
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + "clearAll: " + t);
+                }
+            }
+        };
+        int n = 0;
+        for (Class<?> c = recentsView; c != null && c != ViewGroup.class && c != Object.class;
+             c = c.getSuperclass()) {
+            try {
+                n += XposedBridge.hookAllMethods(c, "dismissAllTasks", clearHook).size();
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + "hookClearAll: " + t);
+            }
+        }
+        clearHookOk = n > 0;
+        XposedBridge.log(TAG + "dismissAllTasks hooks: " + n);
+    }
+
+    /** {packageName, taskId} of a card, or null if unreadable. */
+    private static Object[] taskInfo(View card) {
+        try {
+            Object task = XposedHelpers.callMethod(card, "getTask");
+            if (task == null) return null;
+            Object key = XposedHelpers.getObjectField(task, "key");
+            String pkg = (String) XposedHelpers.callMethod(key, "getPackageName");
+            int id = XposedHelpers.getIntField(key, "id");
+            return new Object[]{pkg, id};
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * Returns true if we cleared things ourselves (some apps are protected), false if the
+     * stock "clear everything" should go ahead.
+     */
+    private static boolean handleClearAll(ViewGroup rv) {
+        Set<String> prot = protectedSet;
+        if (prot.isEmpty() && !rootOn) return false;
+
+        List<View> cards = new ArrayList<>();
+        for (int i = 0; i < rv.getChildCount(); i++) {
+            View c = rv.getChildAt(i);
+            if (c.getClass().getName().endsWith("TaskView")) cards.add(c);
+        }
+
+        boolean anyProtected = false;
+        List<View> removeViews = new ArrayList<>();
+        List<Integer> removeIds = new ArrayList<>();
+        List<String> pkgs = new ArrayList<>();
+        for (View c : cards) {
+            Object[] info = taskInfo(c);
+            if (info == null) {
+                if (!prot.isEmpty()) anyProtected = true; // unknown card: keep it to be safe
+                continue;
+            }
+            String pkg = (String) info[0];
+            if (prot.contains(pkg)) {
+                anyProtected = true;
+                continue;
+            }
+            removeViews.add(c);
+            removeIds.add((Integer) info[1]);
+            pkgs.add(pkg);
+        }
+
+        Context ctx = rv.getContext();
+        if (!anyProtected) {
+            sendClean(ctx, pkgs);
+            return false; // nothing protected on screen: stock clear-all removes everything
+        }
+
+        Object amw = null;
+        try {
+            Class<?> k = XposedHelpers.findClass(
+                    "com.android.systemui.shared.system.ActivityManagerWrapper",
+                    rv.getClass().getClassLoader());
+            amw = XposedHelpers.callStaticMethod(k, "getInstance");
+        } catch (Throwable t) {
+            // fine, dismissTask is tried first anyway
+        }
+        for (int i = 0; i < removeViews.size(); i++) {
+            boolean done = false;
+            try {
+                XposedHelpers.callMethod(rv, "dismissTask", removeViews.get(i), true, true);
+                done = true;
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + "dismissTask: " + t);
+            }
+            if (!done && amw != null) {
+                try {
+                    XposedHelpers.callMethod(amw, "removeTask", removeIds.get(i));
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + "removeTask: " + t);
+                }
+            }
+        }
+        sendClean(ctx, pkgs);
+        return true;
+    }
+
+    private static void sendClean(Context ctx, Collection<String> pkgs) {
+        String tk = token;
+        if (!rootOn || tk == null) return;
+        try {
+            Intent i = new Intent(Prefs.ACTION_CLEAN);
+            i.setClassName(Prefs.PKG, Prefs.PKG + ".CleanReceiver");
+            i.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+            i.putExtra("token", tk);
+            i.putExtra("pkgs", pkgs.toArray(new String[0]));
+            ctx.sendBroadcast(i);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "sendClean: " + t);
         }
     }
 
