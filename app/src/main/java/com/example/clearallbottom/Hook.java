@@ -83,6 +83,15 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile boolean rootOn = Prefs.D_ROOT_ON;
     private static volatile String token = null;
     private static boolean clearHookOk = false;
+    private static volatile boolean iconPopup = Prefs.D_ICON_POPUP;
+    private static volatile boolean transOn = Prefs.D_TRANS_ON;
+    private static volatile int transMs = Prefs.D_TRANS_MS;
+    private static long rvShownAt = 0L;
+    private static boolean lastShown = false;
+    private static boolean animating = false;
+    private static View downIconCard;
+    /** Per card: {time it last became visible, was visible last frame (0/1)}. */
+    private static final WeakHashMap<View, long[]> ANIM = new WeakHashMap<>();
     private static volatile int clearBottomDp = Prefs.D_CLEAR_BOTTOM;
 
     private static XSharedPreferences xp;
@@ -154,6 +163,9 @@ public class Hook implements IXposedHookLoadPackage {
         protectedSet = ps;
         rootOn = xp.getBoolean(Prefs.K_ROOT_ON, Prefs.D_ROOT_ON);
         token = xp.getString(Prefs.K_TOKEN, null);
+        iconPopup = xp.getBoolean(Prefs.K_ICON_POPUP, Prefs.D_ICON_POPUP);
+        transOn = xp.getBoolean(Prefs.K_TRANS_ON, Prefs.D_TRANS_ON);
+        transMs = xp.getInt(Prefs.K_TRANS_MS, Prefs.D_TRANS_MS);
         cfgVersion++;
         clearBottomDp = xp.getInt(Prefs.K_CLEAR_BOTTOM, Prefs.D_CLEAR_BOTTOM);
     }
@@ -319,6 +331,8 @@ public class Hook implements IXposedHookLoadPackage {
     private static List<View> buildOrder(ViewGroup rv, boolean applyTransforms) {
         final int n = rv.getChildCount();
         final int st = style;
+        final long now = SystemClock.uptimeMillis();
+        if (applyTransforms) animating = false;
         List<View> others = new ArrayList<>();
         final List<View> cards = new ArrayList<>();
         View clearAll = null;
@@ -371,6 +385,30 @@ public class Hook implements IXposedHookLoadPackage {
                 }
                 skipped.remove(c);
 
+                // size progress: 0 = launcher's own card size, 1 = your custom size
+                float pr = 1f;
+                if (transOn) {
+                    boolean vis = c.getVisibility() == View.VISIBLE && baseAlpha(c) > 0.02f;
+                    long[] an = ANIM.get(c);
+                    if (an == null) {
+                        an = new long[]{0L, vis ? 1L : 0L};
+                        ANIM.put(c, an);
+                    }
+                    if (vis && an[1] == 0L) an[0] = now;
+                    an[1] = vis ? 1L : 0L;
+                    long start = Math.max(an[0], rvShownAt);
+                    if (start > 0L) {
+                        float xx = (now - start) / (float) Math.max(60, transMs);
+                        if (xx < 1f) {
+                            xx = Math.max(0f, xx);
+                            pr = 1f - (1f - xx) * (1f - xx);
+                            animating = true;
+                        }
+                    }
+                }
+                float curX = 1f + (sizeX - 1f) * pr;
+                float curY = 1f + (sizeY - 1f) * pr;
+
                 float eff = tt <= 1f ? tt : 1f + 0.35f * (tt - 1f);
                 float scale = 1f;
                 float visual = t * step;
@@ -413,7 +451,7 @@ public class Hook implements IXposedHookLoadPackage {
                         break;
                 }
                 float txAbs = visual - tLayout * step; // absolute translation to reach 'visual'
-                applyCard(c, scale * sizeX * squeeze, scale * sizeY, txAbs, dy + yOff, alpha, rot, density);
+                applyCard(c, scale * curX * squeeze, scale * curY, txAbs, dy + yOff, alpha, rot, density);
                 applyRadius(c, density);
             }
         }
@@ -437,6 +475,12 @@ public class Hook implements IXposedHookLoadPackage {
         order.addAll(cards);
         if (clearAll != null) order.add(clearAll);
         return order;
+    }
+
+    /** The launcher's own alpha for a card, ignoring what we wrote. */
+    private static float baseAlpha(View v) {
+        float[] s = STATE.get(v);
+        return (s != null && v.getAlpha() == s[8]) ? s[9] : v.getAlpha();
     }
 
     /** The launcher's own translationX for a card, ignoring what we wrote. */
@@ -673,7 +717,7 @@ public class Hook implements IXposedHookLoadPackage {
                         ViewGroup rv = (ViewGroup) param.thisObject;
                         MotionEvent ev = (MotionEvent) param.args[0];
                         if (handleButtonTouch(rv, ev, param)) return;
-                        if (style == Prefs.STYLE_ORIGINAL) return;
+                        if (style == Prefs.STYLE_ORIGINAL && !iconPopup) return;
 
                         int action = ev.getActionMasked();
                         float slop = ViewConfiguration.get(rv.getContext()).getScaledTouchSlop();
@@ -682,7 +726,9 @@ public class Hook implements IXposedHookLoadPackage {
                             downY = ev.getY();
                             tapMoved = false;
                             tapActive = true;
-                            downTarget = cardAt(rv, downX, downY);
+                            downIconCard = iconPopup ? iconTargetAt(rv, downX, downY) : null;
+                            downTarget = downIconCard != null ? downIconCard
+                                    : cardAt(rv, downX, downY);
                         } else if (tapActive) {
                             if (action == MotionEvent.ACTION_MOVE) {
                                 if (Math.hypot(ev.getX() - downX, ev.getY() - downY) > slop) {
@@ -699,9 +745,13 @@ public class Hook implements IXposedHookLoadPackage {
                                     MotionEvent cancel = MotionEvent.obtain(ev);
                                     cancel.setAction(MotionEvent.ACTION_CANCEL);
                                     param.args[0] = cancel;
+                                    View iconCard = downIconCard;
                                     View target = downTarget;
                                     View upTarget = cardAt(rv, ev.getX(), ev.getY());
-                                    if (target != null && upTarget == target) {
+                                    if (iconCard != null
+                                            && iconTargetAt(rv, ev.getX(), ev.getY()) == iconCard) {
+                                        param.setObjectExtra("tapIcon", iconCard);
+                                    } else if (target != null && upTarget == target) {
                                         param.setObjectExtra("tapCard", target);
                                     } else if (target == null && upTarget == null && tapHome) {
                                         param.setObjectExtra("tapHome", Boolean.TRUE);
@@ -720,6 +770,10 @@ public class Hook implements IXposedHookLoadPackage {
                     try {
                         Object card = param.getObjectExtra("tapCard");
                         if (card instanceof View) ((View) card).performClick();
+                        Object ic = param.getObjectExtra("tapIcon");
+                        if (ic instanceof View) {
+                            openIconPopup((ViewGroup) param.thisObject, (View) ic);
+                        }
                         if (param.getObjectExtra("tapHome") != null) {
                             Intent home = new Intent(Intent.ACTION_MAIN);
                             home.addCategory(Intent.CATEGORY_HOME);
@@ -750,12 +804,17 @@ public class Hook implements IXposedHookLoadPackage {
             @Override
             public boolean onPreDraw() {
                 try {
-                    if (style != Prefs.STYLE_ORIGINAL && rv.isAttachedToWindow()
-                            && rv.getVisibility() == View.VISIBLE && rv.getAlpha() > 0f) {
+                    boolean shown = rv.isAttachedToWindow() && rv.getVisibility() == View.VISIBLE
+                            && rv.getAlpha() > 0f && rv.isShown();
+                    if (shown && !lastShown) rvShownAt = SystemClock.uptimeMillis();
+                    if (!shown && lastShown) RecentsPopup.dismiss();
+                    lastShown = shown;
+                    if (style != Prefs.STYLE_ORIGINAL && shown) {
                         refreshCfg();
                         buildOrder(rv, true);
                         View b = findButton(rv);
                         if (b != null) place(rv, b);
+                        if (animating) rv.postInvalidateOnAnimation();
                     }
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + "preDraw: " + t);
@@ -791,6 +850,79 @@ public class Hook implements IXposedHookLoadPackage {
         } finally {
             sizing = false;
         }
+    }
+
+    // ---------------- icon popup helpers ----------------
+    private static View iconOf(View card) {
+        if (!(card instanceof ViewGroup)) return null;
+        ViewGroup g = (ViewGroup) card;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View c = g.getChildAt(i);
+            if (c.getClass().getName().endsWith("IconView")) return c;
+        }
+        return null;
+    }
+
+    /** Topmost card whose app icon is under (x, y); icons may stick out above their card. */
+    private static View iconTargetAt(ViewGroup rv, float x, float y) {
+        List<View> order = buildOrder(rv, false);
+        float pad = 10 * rv.getResources().getDisplayMetrics().density;
+        for (int i = order.size() - 1; i >= 0; i--) {
+            View c = order.get(i);
+            if (!c.getClass().getName().endsWith("TaskView")) continue;
+            if (c.getVisibility() != View.VISIBLE || skipped.contains(c)) continue;
+            View ic = iconOf(c);
+            if (ic == null || ic.getVisibility() != View.VISIBLE) continue;
+            float[] pt = {x + rv.getScrollX() - c.getLeft(), y + rv.getScrollY() - c.getTop()};
+            Matrix m = c.getMatrix();
+            if (!m.isIdentity()) {
+                Matrix inv = new Matrix();
+                if (m.invert(inv)) inv.mapPoints(pt);
+            }
+            if (pt[0] >= ic.getX() - pad && pt[0] <= ic.getX() + ic.getWidth() + pad
+                    && pt[1] >= ic.getY() - pad && pt[1] <= ic.getY() + ic.getHeight() + pad) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    private static void openIconPopup(ViewGroup rv, View card) {
+        try {
+            Object[] info = taskInfo(card);
+            View icon = iconOf(card);
+            if (info == null || icon == null || info[0] == null) return;
+            RecentsPopup.show(rv, card, icon, (String) info[0], (Integer) info[1]);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "iconPopup: " + t);
+        }
+    }
+
+    static boolean isLocked(String pkg) {
+        return protectedSet.contains(pkg);
+    }
+
+    /** Locks/unlocks an app (adds/removes it from the protected list). Null if it can't be saved. */
+    static Boolean toggleLock(Context ctx, String pkg) {
+        String tk = token;
+        if (tk == null) return null;
+        Set<String> cur = new HashSet<>(protectedSet);
+        boolean lock = !cur.contains(pkg);
+        if (lock) cur.add(pkg);
+        else cur.remove(pkg);
+        protectedSet = cur;
+        try {
+            Intent i = new Intent(Prefs.ACTION_LOCK);
+            i.setClassName(Prefs.PKG, Prefs.PKG + ".CleanReceiver");
+            i.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+            i.putExtra("token", tk);
+            i.putExtra("pkg", pkg);
+            i.putExtra("lock", lock);
+            ctx.sendBroadcast(i);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "toggleLock: " + t);
+        }
+        return lock;
     }
 
     // ---------------- Clear all: protected apps + root clean ----------------

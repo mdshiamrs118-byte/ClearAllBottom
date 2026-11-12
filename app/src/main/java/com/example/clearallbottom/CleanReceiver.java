@@ -9,8 +9,9 @@ import java.util.HashSet;
 import java.util.Set;
 
 /**
- * Receives "Clear all" events from the launcher hook and runs the root clean-up
- * (force-stop, kill background, drop caches) with su. Needs the shared secret token.
+ * Receives events from the launcher hook (needs the shared secret token):
+ *  - CLEAN: run the root clean-up (force-stop, kill background, drop caches) with su
+ *  - LOCK:  lock / unlock an app (add / remove it from the protected list)
  */
 public class CleanReceiver extends BroadcastReceiver {
 
@@ -21,17 +22,34 @@ public class CleanReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context ctx, Intent in) {
-        if (in == null || !Prefs.ACTION_CLEAN.equals(in.getAction())) return;
+        if (in == null || in.getAction() == null) return;
         SharedPreferences sp = ctx.getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE);
         String token = sp.getString(Prefs.K_TOKEN, null);
         if (token == null || !token.equals(in.getStringExtra("token"))) return;
-        if (!sp.getBoolean(Prefs.K_ROOT_ON, Prefs.D_ROOT_ON)) return;
 
         Set<String> protectedSet = new HashSet<>();
         String raw = sp.getString(Prefs.K_PROTECTED, "");
         if (raw != null) {
             for (String s : raw.split(",")) if (s.trim().length() > 0) protectedSet.add(s.trim());
         }
+
+        if (Prefs.ACTION_LOCK.equals(in.getAction())) {
+            String pkg = in.getStringExtra("pkg");
+            if (pkg == null || !pkg.matches("[A-Za-z0-9_.]+")) return;
+            if (in.getBooleanExtra("lock", true)) protectedSet.add(pkg);
+            else protectedSet.remove(pkg);
+            StringBuilder sb = new StringBuilder();
+            for (String s : protectedSet) {
+                if (sb.length() > 0) sb.append(',');
+                sb.append(s);
+            }
+            sp.edit().putString(Prefs.K_PROTECTED, sb.toString()).apply();
+            return;
+        }
+
+        if (!Prefs.ACTION_CLEAN.equals(in.getAction())) return;
+        if (!sp.getBoolean(Prefs.K_ROOT_ON, Prefs.D_ROOT_ON)) return;
+
         StringBuilder cmd = new StringBuilder();
         String[] pkgs = in.getStringArrayExtra("pkgs");
         if (sp.getBoolean(Prefs.K_ROOT_FORCE, Prefs.D_ROOT_FORCE) && pkgs != null) {

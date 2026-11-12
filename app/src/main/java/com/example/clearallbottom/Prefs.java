@@ -46,6 +46,10 @@ public final class Prefs {
     public static final String K_ROOT_DROP = "root_drop_caches";
     public static final String K_TOKEN = "token";
     public static final String ACTION_CLEAN = "com.example.clearallbottom.CLEAN";
+    public static final String K_ICON_POPUP = "icon_popup";
+    public static final String K_TRANS_ON = "trans_on";
+    public static final String K_TRANS_MS = "trans_ms";
+    public static final String ACTION_LOCK = "com.example.clearallbottom.LOCK";
     public static final String K_PIN = "pin_clear_all";
     public static final String K_CLEAR_BOTTOM = "clear_bottom_dp";
 
@@ -80,6 +84,9 @@ public final class Prefs {
     public static final boolean D_ROOT_FORCE = true;
     public static final boolean D_ROOT_KILLBG = false;
     public static final boolean D_ROOT_DROP = false;
+    public static final boolean D_ICON_POPUP = true;
+    public static final boolean D_TRANS_ON = true;
+    public static final int D_TRANS_MS = 260;
     public static final boolean D_PIN = true;
     public static final int D_CLEAR_BOTTOM = 72;
 

@@ -157,6 +157,9 @@ public class MainActivity extends Activity {
         slider(root, Prefs.K_HEIGHT, "Card height", 50, 150, Prefs.D_HEIGHT, "%", null);
         slider(root, Prefs.K_RADIUS, "Corner roundness", 0, 64, Prefs.D_RADIUS, " dp", "Stock");
         slider(root, Prefs.K_YOFF, "Move cards up / down", -150, 150, Prefs.D_YOFF, " dp", null);
+        toggle(root, Prefs.K_TRANS_ON, "Smooth transition from stock size to custom size "
+                + "(off = custom size right away)", Prefs.D_TRANS_ON);
+        slider(root, Prefs.K_TRANS_MS, "Transition duration", 100, 800, Prefs.D_TRANS_MS, " ms", null);
 
         // ----- Stack layout -----
         heading(root, "Stack layout (not used by Original)");
@@ -172,6 +175,8 @@ public class MainActivity extends Activity {
         // ----- Touch -----
         heading(root, "Touch");
         toggle(root, Prefs.K_TAP_HOME, "Tap empty space to go home", Prefs.D_TAP_HOME);
+        toggle(root, Prefs.K_ICON_POPUP, "Tap an app icon for the icon popup "
+                + "(freeform, split screen, app info, lock)", Prefs.D_ICON_POPUP);
 
         // ----- Clear all -----
         heading(root, "Clear all button");
@@ -827,6 +832,20 @@ public class MainActivity extends Activity {
         });
         root.addView(prot);
 
+        Button ff = new Button(this);
+        ff.setAllCaps(false);
+        ff.setText("Enable freeform windows (root, reboot after)");
+        ff.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                runRoot("settings put global enable_freeform_support 1; "
+                        + "settings put global force_resizable_activities 1; "
+                        + "settings put global freeform_window_management 1",
+                        "Freeform enabled. Reboot for it to take effect.");
+            }
+        });
+        root.addView(ff);
+
         Button test = new Button(this);
         test.setAllCaps(false);
         test.setText("Test root access");
@@ -912,6 +931,28 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    private void runRoot(final String cmd, final String okMessage) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String res;
+                try {
+                    Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
+                    res = p.waitFor() == 0 ? okMessage : "Root command failed";
+                } catch (Exception e) {
+                    res = "No root: " + e.getMessage();
+                }
+                final String msg = res;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        }).start();
     }
 
     private void testRoot() {
