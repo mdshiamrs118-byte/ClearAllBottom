@@ -145,6 +145,7 @@ public class Hook implements IXposedHookLoadPackage {
 
     // ---------------- state ----------------
     private static boolean placing = false;
+    private static boolean sizing = false;
     private static boolean tracking = false;
     private static boolean pinnedApplied = false;
     private static Method drawChildMethod;
@@ -746,6 +747,34 @@ public class Hook implements IXposedHookLoadPackage {
         });
     }
 
+    /**
+     * The launcher measures this button with its own size rules, which can ignore our
+     * width/height. Re-measure and re-lay it out at exactly the requested size, keeping
+     * its center where the launcher put it.
+     */
+    private static void enforceSize(View button) {
+        if (!btnOn || (btnW <= 0 && btnH <= 0) || sizing) return;
+        float d = button.getResources().getDisplayMetrics().density;
+        int tw = btnW > 0 ? Math.round(btnW * d) : button.getWidth();
+        int th = btnH > 0 ? Math.round(btnH * d) : button.getHeight();
+        if (tw <= 0 || th <= 0) return;
+        if (button.getWidth() == tw && button.getHeight() == th) return;
+        sizing = true;
+        try {
+            int cx = button.getLeft() + button.getWidth() / 2;
+            int cy = button.getTop() + button.getHeight() / 2;
+            button.measure(View.MeasureSpec.makeMeasureSpec(tw, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(th, View.MeasureSpec.EXACTLY));
+            int left = cx - tw / 2;
+            int top = btnH > 0 ? button.getTop() : cy - th / 2;
+            button.layout(left, top, left + tw, top + th);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "enforceSize: " + t);
+        } finally {
+            sizing = false;
+        }
+    }
+
     // ---------------- Clear all button look ----------------
     private static void styleButton(View v) {
         if (!(v instanceof TextView)) return;
@@ -855,8 +884,9 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     private static void place(ViewGroup rv, View button) {
-        if (placing) return;
+        if (placing || sizing) return;
         styleButton(button);
+        enforceSize(button);
         if (!pinClear) {
             if (pinnedApplied) {
                 pinnedApplied = false;
