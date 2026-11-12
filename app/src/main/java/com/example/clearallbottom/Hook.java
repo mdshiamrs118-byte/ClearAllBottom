@@ -1,58 +1,130 @@
 package com.example.clearallbottom;
 
 import android.graphics.Canvas;
+import android.graphics.Outline;
+import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XC_MethodReplacement;
+import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 /**
- * Quickstep Recents tweaks:
- *  - "Clear all" pinned to bottom-center, always visible, tappable.
- *  - Stacked-cards look: the centered card is in front, neighbours shrink and
- *    tuck behind it. Swiping is still left/right.
+ * Recents Styler: restyles the Quickstep Recents screen (Original / Stack / Cover flow /
+ * iPhone style), card size and corner roundness, and pins the Clear all button.
  */
 public class Hook implements IXposedHookLoadPackage {
 
-    // ---------- tuning ----------
-    private static final boolean STACK_EFFECT = true;
-    /** Distance (dp) between Clear all's bottom edge and the bottom of Recents. */
-    private static final int BOTTOM_OFFSET_DP = 72;
-    /** How much each step away from the center shrinks a card. */
-    private static final float SCALE_STEP = 0.07f;
-    private static final float MIN_SCALE = 0.70f;
-    /** Fraction of the normal card spacing kept between stacked cards (smaller = tighter pile). */
-    private static final float SPACING = 0.32f;
-    /** Cards further back are lifted this many dp per step (max 3 steps). */
-    private static final float LIFT_DP = 10f;
-    /** Cards further than this many steps from the center aren't drawn. */
-    private static final float MAX_DEPTH = 3.6f;
-    // ----------------------------
-
-    private static final String TAG = "ClearAllBottom: ";
+    private static final String TAG = "RecentsStyler: ";
     private static final String RV = "com.android.quickstep.views.RecentsView";
 
+    // ---------------- live settings (reloaded from the settings app) ----------------
+    private static volatile int style = Prefs.D_STYLE;
+    private static volatile int widthPct = Prefs.D_WIDTH;
+    private static volatile int heightPct = Prefs.D_HEIGHT;
+    private static volatile int radiusDp = Prefs.D_RADIUS;
+    private static volatile int yOffDp = Prefs.D_YOFF;
+    private static volatile int spacingPct = Prefs.D_SPACING;
+    private static volatile int shrinkPct = Prefs.D_SHRINK;
+    private static volatile int fadePct = Prefs.D_FADE;
+    private static volatile int tiltDeg = Prefs.D_TILT;
+    private static volatile int depth = Prefs.D_DEPTH;
+    private static volatile int liftDp = Prefs.D_LIFT;
+    private static volatile boolean invertTilt = Prefs.D_INVERT;
+    private static volatile boolean pinClear = Prefs.D_PIN;
+    private static volatile int clearBottomDp = Prefs.D_CLEAR_BOTTOM;
+
+    private static XSharedPreferences xp;
+    private static long lastCheck;
+    private static boolean warned;
+
+    private static void refreshCfg() {
+        long now = SystemClock.uptimeMillis();
+        if (now - lastCheck < 500) return;
+        lastCheck = now;
+        try {
+            if (xp == null) {
+                xp = new XSharedPreferences(Prefs.PKG, Prefs.NAME);
+                loadCfg();
+            } else if (xp.hasFileChanged()) {
+                xp.reload();
+                loadCfg();
+            }
+        } catch (Throwable t) {
+            if (!warned) {
+                warned = true;
+                XposedBridge.log(TAG + "prefs: " + t);
+            }
+        }
+    }
+
+    private static void loadCfg() {
+        if (!xp.getFile().canRead()) {
+            if (!warned) {
+                warned = true;
+                XposedBridge.log(TAG + "settings file not readable yet, using defaults");
+            }
+            return;
+        }
+        style = xp.getInt(Prefs.K_STYLE, Prefs.D_STYLE);
+        widthPct = xp.getInt(Prefs.K_WIDTH, Prefs.D_WIDTH);
+        heightPct = xp.getInt(Prefs.K_HEIGHT, Prefs.D_HEIGHT);
+        radiusDp = xp.getInt(Prefs.K_RADIUS, Prefs.D_RADIUS);
+        yOffDp = xp.getInt(Prefs.K_YOFF, Prefs.D_YOFF);
+        spacingPct = xp.getInt(Prefs.K_SPACING, Prefs.D_SPACING);
+        shrinkPct = xp.getInt(Prefs.K_SHRINK, Prefs.D_SHRINK);
+        fadePct = xp.getInt(Prefs.K_FADE, Prefs.D_FADE);
+        tiltDeg = xp.getInt(Prefs.K_TILT, Prefs.D_TILT);
+        depth = xp.getInt(Prefs.K_DEPTH, Prefs.D_DEPTH);
+        liftDp = xp.getInt(Prefs.K_LIFT, Prefs.D_LIFT);
+        invertTilt = xp.getBoolean(Prefs.K_INVERT, Prefs.D_INVERT);
+        pinClear = xp.getBoolean(Prefs.K_PIN, Prefs.D_PIN);
+        clearBottomDp = xp.getInt(Prefs.K_CLEAR_BOTTOM, Prefs.D_CLEAR_BOTTOM);
+    }
+
+    // ---------------- state ----------------
     private static boolean placing = false;
     private static boolean tracking = false;
+    private static boolean pinnedApplied = false;
     private static Method drawChildMethod;
 
     /** Per-card record of what we last wrote, so we build on top of the launcher's own values. */
     private static final WeakHashMap<View, float[]> STATE = new WeakHashMap<>();
+    /** Thumbnail views whose corners we changed (original values saved). */
+    private static final WeakHashMap<View, Object[]> RADIUS = new WeakHashMap<>();
+    /** Cards we decided not to draw this frame (too deep). */
+    private static final Set<View> skipped =
+            Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
 
+    // ---------------- entry ----------------
     @Override
     public void handleLoadPackage(LoadPackageParam lpparam) {
+        if (Prefs.PKG.equals(lpparam.packageName)) {
+            try {
+                XposedHelpers.findAndHookMethod(Prefs.PKG + ".MainActivity", lpparam.classLoader,
+                        "isModuleActive", XC_MethodReplacement.returnConstant(true));
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + "self hook: " + t);
+            }
+            return;
+        }
+
         final Class<?> recentsView = XposedHelpers.findClassIfExists(RV, lpparam.classLoader);
         if (recentsView == null) {
             return;
@@ -76,7 +148,7 @@ public class Hook implements IXposedHookLoadPackage {
 
         hookDraw(recentsView);
         hookTouchOrder();
-        hookTouch();
+        hookButtonTouch();
 
         Class<?> clearAll = XposedHelpers.findClassIfExists(
                 "com.android.quickstep.views.ClearAllButton", lpparam.classLoader);
@@ -101,9 +173,7 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
-    // ------------------------------------------------------------------ drawing
-
-    /** Replaces RecentsView's child drawing so cards are painted back-to-front by depth. */
+    // ---------------- drawing ----------------
     private static void hookDraw(Class<?> recentsView) {
         for (Class<?> c = recentsView; c != null && c != ViewGroup.class; c = c.getSuperclass()) {
             try {
@@ -113,8 +183,13 @@ public class Hook implements IXposedHookLoadPackage {
                     protected void beforeHookedMethod(MethodHookParam param) {
                         if (!isRecentsView(param.thisObject.getClass())) return;
                         try {
+                            refreshCfg();
                             ViewGroup rv = (ViewGroup) param.thisObject;
                             apply(rv);
+                            if (style == Prefs.STYLE_ORIGINAL) {
+                                restoreAll(rv);
+                                return; // stock drawing; button is drawn in afterHook
+                            }
                             List<View> order = buildOrder(rv, true);
                             Canvas canvas = (Canvas) param.args[0];
                             long time = rv.getDrawingTime();
@@ -124,14 +199,31 @@ public class Hook implements IXposedHookLoadPackage {
                                 if (skipped.contains(v)) continue;
                                 dc.invoke(rv, canvas, v, time);
                             }
-                            param.setResult(null); // we drew everything
+                            param.setObjectExtra("custom", Boolean.TRUE);
+                            param.setResult(null);
                         } catch (Throwable t) {
-                            XposedBridge.log(TAG + "draw: " + t); // fall back to original draw
+                            XposedBridge.log(TAG + "draw: " + t); // fall back to stock draw
+                        }
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (!isRecentsView(param.thisObject.getClass())) return;
+                        if (param.getObjectExtra("custom") != null || !pinClear) return;
+                        try {
+                            ViewGroup rv = (ViewGroup) param.thisObject;
+                            View b = findButton(rv);
+                            if (b != null && b.getVisibility() == View.VISIBLE) {
+                                getDrawChild().invoke(rv, (Canvas) param.args[0], b,
+                                        rv.getDrawingTime());
+                            }
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + "draw button: " + t);
                         }
                     }
                 });
                 XposedBridge.log(TAG + "draw hooked in " + c.getName());
-                return; // most-derived declaration only
+                return;
             } catch (NoSuchMethodException ignored) {
             } catch (Throwable t) {
                 XposedBridge.log(TAG + "hookDraw: " + t);
@@ -149,16 +241,13 @@ public class Hook implements IXposedHookLoadPackage {
         return drawChildMethod;
     }
 
-    /** Cards we decided not to draw this frame (too deep in the stack). */
-    private static final java.util.Set<View> skipped =
-            java.util.Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
-
     /**
-     * Returns ALL children ordered back-to-front (last = topmost).
-     * When applyTransforms is true, also applies the stack transforms to the cards.
+     * Returns ALL children ordered back-to-front (last = topmost). When applyTransforms is
+     * true, also applies the selected style's transforms to the cards.
      */
     private static List<View> buildOrder(ViewGroup rv, boolean applyTransforms) {
         final int n = rv.getChildCount();
+        final int st = style;
         List<View> others = new ArrayList<>();
         final List<View> cards = new ArrayList<>();
         View clearAll = null;
@@ -170,8 +259,8 @@ public class Hook implements IXposedHookLoadPackage {
             else others.add(v);
         }
 
-        final java.util.IdentityHashMap<View, Float> depth = new java.util.IdentityHashMap<>();
-        if (STACK_EFFECT && !cards.isEmpty()) {
+        final IdentityHashMap<View, Float> key = new IdentityHashMap<>();
+        if (!cards.isEmpty()) {
             float density = rv.getResources().getDisplayMetrics().density;
             float rvCenter = rv.getWidth() / 2f;
             float step;
@@ -183,41 +272,84 @@ public class Hook implements IXposedHookLoadPackage {
             }
             if (step < 1f) step = Math.max(1f, rv.getWidth() * 0.9f);
 
+            float sizeX = widthPct / 100f;
+            float sizeY = heightPct / 100f;
+            float spacing = spacingPct / 100f;
+            float shrink = shrinkPct / 100f;
+            float fade = fadePct / 100f;
+            float maxDepth = depth + 0.6f;
+            float yOff = yOffDp * density;
+
             for (View c : cards) {
                 float layoutCenter = c.getLeft() + c.getWidth() / 2f;
                 float t = (layoutCenter - rv.getScrollX() - rvCenter) / step;
                 float tt = Math.abs(t);
-                depth.put(c, tt);
+                float s = Math.signum(t);
+                // sort key: ascending = back to front
+                if (st == Prefs.STYLE_IPHONE) key.put(c, t < 0 ? -tt : tt + 0.0001f);
+                else key.put(c, -tt);
+
                 if (!applyTransforms) continue;
 
-                if (tt > MAX_DEPTH) {
+                if (tt > maxDepth) {
                     skipped.add(c);
                     continue;
                 }
                 skipped.remove(c);
 
-                float scale = Math.max(MIN_SCALE, 1f - SCALE_STEP * tt);
                 float eff = tt <= 1f ? tt : 1f + 0.35f * (tt - 1f);
-                float visualOffset = Math.signum(t) * step * SPACING * eff;
-                float dx = visualOffset - t * step;
-                float dy = -LIFT_DP * density * Math.min(tt, 3f);
-                applyOnTopOfLauncher(c, scale, dx, dy);
+                float scale = 1f;
+                float visual = t * step;
+                float dy = 0f;
+                float alpha = 1f;
+                float rot = 0f;
+
+                switch (st) {
+                    case Prefs.STYLE_STACK:
+                        scale = Math.max(0.5f, 1f - shrink * tt);
+                        visual = s * step * spacing * eff;
+                        dy = -liftDp * density * Math.min(tt, 3f);
+                        alpha = Math.max(0f, 1f - fade * tt);
+                        break;
+                    case Prefs.STYLE_COVERFLOW:
+                        scale = Math.max(0.5f, 1f - shrink * tt);
+                        visual = s * step * spacing * eff;
+                        alpha = Math.max(0f, 1f - fade * tt);
+                        rot = (invertTilt ? 1f : -1f) * s * tiltDeg * Math.min(tt, 1f);
+                        break;
+                    case Prefs.STYLE_IPHONE:
+                        if (t < 0f) {
+                            // older cards pile up behind, peeking out on the left
+                            float e = tt <= 1f ? tt : 1f + 0.25f * (tt - 1f);
+                            scale = Math.max(0.5f, 1f - shrink * tt);
+                            visual = -step * spacing * 0.7f * e;
+                            alpha = Math.max(0f, 1f - fade * tt);
+                        } else {
+                            // the card slides away to the right at normal speed, on top
+                            scale = 1f;
+                            visual = t * step;
+                        }
+                        break;
+                    default:
+                        break;
+                }
+                float dx = visual - t * step;
+                applyCard(c, scale * sizeX, scale * sizeY, dx, dy + yOff, alpha, rot, density);
+                applyRadius(c, density);
             }
         }
 
-        // Back-to-front: deepest first, centered card last.
         Collections.sort(cards, new Comparator<View>() {
             @Override
             public int compare(View a, View b) {
-                Float da = depth.get(a), db = depth.get(b);
-                float fa = da == null ? 0f : da, fb = db == null ? 0f : db;
-                int c = Float.compare(fb, fa);
-                return c != 0 ? c : Integer.compare(rv_indexOf(b), rv_indexOf(a));
-            }
-
-            private int rv_indexOf(View v) {
-                ViewGroup p = (ViewGroup) v.getParent();
-                return p == null ? 0 : p.indexOfChild(v);
+                Float ka = key.get(a), kb = key.get(b);
+                float fa = ka == null ? 0f : ka, fb = kb == null ? 0f : kb;
+                int c = Float.compare(fa, fb);
+                if (c != 0) return c;
+                ViewGroup pa = (ViewGroup) a.getParent();
+                int ia = pa == null ? 0 : pa.indexOfChild(a);
+                int ib = pa == null ? 0 : pa.indexOfChild(b);
+                return Integer.compare(ib, ia);
             }
         });
 
@@ -228,36 +360,126 @@ public class Hook implements IXposedHookLoadPackage {
         return order;
     }
 
-    /**
-     * Sets scale/translation as (launcher's own value) combined with our effect,
-     * remembering what we wrote so we can tell when the launcher changes it again.
-     */
-    private static void applyOnTopOfLauncher(View v, float scale, float dx, float dy) {
-        float[] st = STATE.get(v);
-        if (st == null) {
-            st = new float[8];
-            for (int i = 0; i < st.length; i++) st[i] = Float.NaN;
-            STATE.put(v, st);
+    /** Sets scale/translation/alpha as (launcher's own value) combined with our effect. */
+    private static void applyCard(View v, float sx, float sy, float dx, float dy,
+                                  float alpha, float rot, float density) {
+        float[] s = STATE.get(v);
+        if (s == null) {
+            s = new float[10];
+            for (int i = 0; i < s.length; i++) s[i] = Float.NaN;
+            STATE.put(v, s);
         }
-        // st: [lastSX, baseSX, lastSY, baseSY, lastTX, baseTX, lastTY, baseTY]
-        float baseSX = (v.getScaleX() == st[0]) ? st[1] : v.getScaleX();
-        float baseSY = (v.getScaleY() == st[2]) ? st[3] : v.getScaleY();
-        float baseTX = (v.getTranslationX() == st[4]) ? st[5] : v.getTranslationX();
-        float baseTY = (v.getTranslationY() == st[6]) ? st[7] : v.getTranslationY();
+        // [lastSX, baseSX, lastSY, baseSY, lastTX, baseTX, lastTY, baseTY, lastA, baseA]
+        float bSX = (v.getScaleX() == s[0]) ? s[1] : v.getScaleX();
+        float bSY = (v.getScaleY() == s[2]) ? s[3] : v.getScaleY();
+        float bTX = (v.getTranslationX() == s[4]) ? s[5] : v.getTranslationX();
+        float bTY = (v.getTranslationY() == s[6]) ? s[7] : v.getTranslationY();
+        float bA = (v.getAlpha() == s[8]) ? s[9] : v.getAlpha();
 
-        v.setScaleX(baseSX * scale);
-        v.setScaleY(baseSY * scale);
-        v.setTranslationX(baseTX + dx);
-        v.setTranslationY(baseTY + dy);
+        v.setScaleX(bSX * sx);
+        v.setScaleY(bSY * sy);
+        v.setTranslationX(bTX + dx);
+        v.setTranslationY(bTY + dy);
+        v.setAlpha(bA * alpha);
+        if (rot != 0f) v.setCameraDistance(density * 6000f);
+        if (v.getRotationY() != rot) v.setRotationY(rot);
 
-        st[0] = v.getScaleX();  st[1] = baseSX;
-        st[2] = v.getScaleY();  st[3] = baseSY;
-        st[4] = v.getTranslationX(); st[5] = baseTX;
-        st[6] = v.getTranslationY(); st[7] = baseTY;
+        s[0] = v.getScaleX();        s[1] = bSX;
+        s[2] = v.getScaleY();        s[3] = bSY;
+        s[4] = v.getTranslationX();  s[5] = bTX;
+        s[6] = v.getTranslationY();  s[7] = bTY;
+        s[8] = v.getAlpha();         s[9] = bA;
     }
 
-    // ------------------------------------------------------------------ touch
+    /** Puts every card back to what the launcher set (used by Original style). */
+    private static void restoreAll(ViewGroup rv) {
+        if (STATE.isEmpty() && RADIUS.isEmpty() && skipped.isEmpty()) return;
+        for (int i = 0; i < rv.getChildCount(); i++) {
+            View v = rv.getChildAt(i);
+            float[] s = STATE.get(v);
+            if (s != null) {
+                if (v.getScaleX() == s[0]) v.setScaleX(s[1]);
+                if (v.getScaleY() == s[2]) v.setScaleY(s[3]);
+                if (v.getTranslationX() == s[4]) v.setTranslationX(s[5]);
+                if (v.getTranslationY() == s[6]) v.setTranslationY(s[7]);
+                if (v.getAlpha() == s[8]) v.setAlpha(s[9]);
+                v.setRotationY(0f);
+            }
+            View th = findThumb(v);
+            if (th != null) restoreRadius(th);
+        }
+        STATE.clear();
+        skipped.clear();
+    }
 
+    // ---------------- corner roundness ----------------
+    private static View findThumb(View card) {
+        if (!(card instanceof ViewGroup)) return null;
+        ViewGroup g = (ViewGroup) card;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View c = g.getChildAt(i);
+            if (c.getClass().getName().endsWith("TaskThumbnailView")) return c;
+        }
+        return null;
+    }
+
+    private static float getF(View v, String name) {
+        try {
+            return XposedHelpers.getFloatField(v, name);
+        } catch (Throwable t) {
+            return Float.NaN;
+        }
+    }
+
+    private static void setF(View v, String name, float value) {
+        try {
+            XposedHelpers.setFloatField(v, name, value);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void applyRadius(View card, float density) {
+        View th = findThumb(card);
+        if (th == null) return;
+        Object[] st = RADIUS.get(th);
+        if (radiusDp <= 0) {
+            if (st != null) restoreRadius(th);
+            return;
+        }
+        final float r = radiusDp * density;
+        if (st != null && ((Float) st[4]).floatValue() == r) return;
+        if (st == null) {
+            st = new Object[]{th.getOutlineProvider(), th.getClipToOutline(),
+                    getF(th, "mCornerRadius"), getF(th, "mWindowCornerRadius"), -1f};
+            RADIUS.put(th, st);
+        }
+        setF(th, "mCornerRadius", r);
+        setF(th, "mWindowCornerRadius", r);
+        th.setOutlineProvider(new ViewOutlineProvider() {
+            @Override
+            public void getOutline(View view, Outline outline) {
+                outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), r);
+            }
+        });
+        th.setClipToOutline(true);
+        th.invalidateOutline();
+        th.invalidate();
+        st[4] = r;
+    }
+
+    private static void restoreRadius(View th) {
+        Object[] st = RADIUS.remove(th);
+        if (st == null) return;
+        th.setOutlineProvider((ViewOutlineProvider) st[0]);
+        th.setClipToOutline((Boolean) st[1]);
+        float c = (Float) st[2], w = (Float) st[3];
+        if (!Float.isNaN(c)) setF(th, "mCornerRadius", c);
+        if (!Float.isNaN(w)) setF(th, "mWindowCornerRadius", w);
+        th.invalidateOutline();
+        th.invalidate();
+    }
+
+    // ---------------- touch ----------------
     /** Makes touch hit-testing use the same front-to-back order as drawing. */
     private static void hookTouchOrder() {
         try {
@@ -266,7 +488,8 @@ public class Hook implements IXposedHookLoadPackage {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             try {
-                                if (!STACK_EFFECT || !isRecentsView(param.thisObject.getClass())) return;
+                                if (style == Prefs.STYLE_ORIGINAL
+                                        || !isRecentsView(param.thisObject.getClass())) return;
                                 ViewGroup rv = (ViewGroup) param.thisObject;
                                 List<View> order = buildOrder(rv, false);
                                 if (order.size() == rv.getChildCount()) {
@@ -283,18 +506,15 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
-    /**
-     * The Clear all button is drawn away from its layout position, so route taps on its
-     * visible area to it ourselves.
-     */
-    private static void hookTouch() {
+    /** The Clear all button is drawn away from its layout spot, so route its taps ourselves. */
+    private static void hookButtonTouch() {
         try {
             XposedHelpers.findAndHookMethod(ViewGroup.class, "dispatchTouchEvent",
                     MotionEvent.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
                     try {
-                        if (!isRecentsView(param.thisObject.getClass())) return;
+                        if (!pinClear || !isRecentsView(param.thisObject.getClass())) return;
                         ViewGroup rv = (ViewGroup) param.thisObject;
                         View b = findButton(rv);
                         if (b == null || b.getVisibility() != View.VISIBLE) return;
@@ -303,11 +523,11 @@ public class Hook implements IXposedHookLoadPackage {
 
                         float pad = 8 * rv.getResources().getDisplayMetrics().density;
                         float l = b.getX() - rv.getScrollX() - pad;
-                        float t = b.getY() - pad;
+                        float top = b.getY() - pad;
                         float r = l + b.getWidth() + 2 * pad;
-                        float bt = t + b.getHeight() + 2 * pad;
+                        float bottom = top + b.getHeight() + 2 * pad;
                         boolean inside = ev.getX() >= l && ev.getX() <= r
-                                && ev.getY() >= t && ev.getY() <= bt;
+                                && ev.getY() >= top && ev.getY() <= bottom;
 
                         if (action == MotionEvent.ACTION_DOWN) {
                             tracking = inside;
@@ -331,15 +551,13 @@ public class Hook implements IXposedHookLoadPackage {
                     }
                 }
             });
-            XposedBridge.log(TAG + "touch hooked");
+            XposedBridge.log(TAG + "button touch hooked");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + "hookTouch: " + t);
+            XposedBridge.log(TAG + "hookButtonTouch: " + t);
         }
     }
 
-    // ------------------------------------------------------------------ helpers
-
-    /** Hooks every method called `name` declared in clazz and its superclasses up to ViewGroup. */
+    // ---------------- helpers ----------------
     private static void hookChain(Class<?> clazz, String name, XC_MethodHook hook) {
         for (Class<?> c = clazz; c != null && c != ViewGroup.class && c != View.class
                 && c != Object.class; c = c.getSuperclass()) {
@@ -369,6 +587,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static void apply(Object thiz) {
         try {
             if (!isRecentsView(thiz.getClass())) return;
+            refreshCfg();
             ViewGroup rv = (ViewGroup) thiz;
             View b = findButton(rv);
             if (b != null) place(rv, b);
@@ -378,12 +597,20 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     private static void place(ViewGroup rv, View button) {
-        if (placing || rv.getWidth() == 0 || rv.getHeight() == 0 || button.getHeight() == 0) return;
+        if (placing) return;
+        if (!pinClear) {
+            if (pinnedApplied) {
+                pinnedApplied = false;
+                button.setTranslationY(0f);
+            }
+            return;
+        }
+        if (rv.getWidth() == 0 || rv.getHeight() == 0 || button.getHeight() == 0) return;
         placing = true;
         try {
             float density = rv.getResources().getDisplayMetrics().density;
 
-            float ty = rv.getHeight() - BOTTOM_OFFSET_DP * density
+            float ty = rv.getHeight() - clearBottomDp * density
                     - button.getHeight() - button.getTop();
             if (Math.abs(button.getTranslationY() - ty) > 0.5f) button.setTranslationY(ty);
 
@@ -392,6 +619,7 @@ public class Hook implements IXposedHookLoadPackage {
             if (Math.abs(button.getTranslationX() - tx) > 0.5f) button.setTranslationX(tx);
 
             if (button.getAlpha() != 1f) button.setAlpha(1f);
+            pinnedApplied = true;
         } finally {
             placing = false;
         }

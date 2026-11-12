@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">Clear All Bottom</string>
-    <string name="xposed_desc">Moves the Recents "Clear all" button to the bottom of the screen</string>
+    <string name="app_name">Recents Styler</string>
+    <string name="xposed_desc">Restyle the Recents screen: stack, cover flow, iPhone style, card size and corners, Clear all button</string>
 </resources>
