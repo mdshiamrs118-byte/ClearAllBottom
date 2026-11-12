@@ -1,5 +1,6 @@
 package com.example.clearallbottom;
 
+import android.content.Intent;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.Outline;
@@ -51,6 +52,8 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile int liftDp = Prefs.D_LIFT;
     private static volatile boolean invertTilt = Prefs.D_INVERT;
     private static volatile boolean pinClear = Prefs.D_PIN;
+    private static volatile boolean flatTilt = Prefs.D_FLAT;
+    private static volatile boolean tapHome = Prefs.D_TAP_HOME;
     private static volatile int clearBottomDp = Prefs.D_CLEAR_BOTTOM;
 
     private static XSharedPreferences xp;
@@ -98,6 +101,8 @@ public class Hook implements IXposedHookLoadPackage {
         liftDp = xp.getInt(Prefs.K_LIFT, Prefs.D_LIFT);
         invertTilt = xp.getBoolean(Prefs.K_INVERT, Prefs.D_INVERT);
         pinClear = xp.getBoolean(Prefs.K_PIN, Prefs.D_PIN);
+        flatTilt = xp.getBoolean(Prefs.K_FLAT, Prefs.D_FLAT);
+        tapHome = xp.getBoolean(Prefs.K_TAP_HOME, Prefs.D_TAP_HOME);
         clearBottomDp = xp.getInt(Prefs.K_CLEAR_BOTTOM, Prefs.D_CLEAR_BOTTOM);
     }
 
@@ -109,6 +114,8 @@ public class Hook implements IXposedHookLoadPackage {
     private static float downX, downY;
     private static boolean tapActive, tapMoved;
     private static View downTarget;
+    private static final Set<View> LAYERED =
+            Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
     private static final WeakHashMap<ViewGroup, ViewTreeObserver> OBSERVERS = new WeakHashMap<>();
 
     /** Per-card record of what we last wrote, so we build on top of the launcher's own values. */
@@ -310,6 +317,7 @@ public class Hook implements IXposedHookLoadPackage {
                 float dy = 0f;
                 float alpha = 1f;
                 float rot = 0f;
+                float squeeze = 1f;
 
                 switch (st) {
                     case Prefs.STYLE_STACK:
@@ -323,6 +331,10 @@ public class Hook implements IXposedHookLoadPackage {
                         visual = s * step * spacing * eff;
                         alpha = Math.max(0f, 1f - fade * tt);
                         rot = (invertTilt ? 1f : -1f) * s * tiltDeg * Math.min(tt, 1f);
+                        if (flatTilt) {
+                            squeeze = (float) Math.cos(Math.toRadians(Math.abs(rot)));
+                            rot = 0f;
+                        }
                         break;
                     case Prefs.STYLE_IPHONE:
                         if (t < 0f) {
@@ -341,7 +353,7 @@ public class Hook implements IXposedHookLoadPackage {
                         break;
                 }
                 float dx = visual - t * step;
-                applyCard(c, scale * sizeX, scale * sizeY, dx, dy + yOff, alpha, rot, density);
+                applyCard(c, scale * sizeX * squeeze, scale * sizeY, dx, dy + yOff, alpha, rot, density);
                 applyRadius(c, density);
             }
         }
@@ -388,7 +400,13 @@ public class Hook implements IXposedHookLoadPackage {
         v.setTranslationX(bTX + dx);
         v.setTranslationY(bTY + dy);
         v.setAlpha(bA * alpha);
-        if (rot != 0f) v.setCameraDistance(density * 6000f);
+        if (rot != 0f) {
+            v.setCameraDistance(density * 6000f);
+            // Render 3D-tilted cards through an offscreen layer so their content isn't lost.
+            if (LAYERED.add(v)) v.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        } else if (LAYERED.remove(v)) {
+            v.setLayerType(View.LAYER_TYPE_NONE, null);
+        }
         if (v.getRotationY() != rot) v.setRotationY(rot);
 
         s[0] = v.getScaleX();        s[1] = bSX;
@@ -412,6 +430,7 @@ public class Hook implements IXposedHookLoadPackage {
                 if (v.getAlpha() == s[8]) v.setAlpha(s[9]);
                 v.setRotationY(0f);
             }
+            if (LAYERED.remove(v)) v.setLayerType(View.LAYER_TYPE_NONE, null);
             View th = findThumb(v);
             if (th != null) restoreRadius(th);
         }
@@ -613,9 +632,11 @@ public class Hook implements IXposedHookLoadPackage {
                                     cancel.setAction(MotionEvent.ACTION_CANCEL);
                                     param.args[0] = cancel;
                                     View target = downTarget;
-                                    if (target != null
-                                            && cardAt(rv, ev.getX(), ev.getY()) == target) {
+                                    View upTarget = cardAt(rv, ev.getX(), ev.getY());
+                                    if (target != null && upTarget == target) {
                                         param.setObjectExtra("tapCard", target);
+                                    } else if (target == null && upTarget == null && tapHome) {
+                                        param.setObjectExtra("tapHome", Boolean.TRUE);
                                     }
                                 }
                                 downTarget = null;
@@ -631,6 +652,12 @@ public class Hook implements IXposedHookLoadPackage {
                     try {
                         Object card = param.getObjectExtra("tapCard");
                         if (card instanceof View) ((View) card).performClick();
+                        if (param.getObjectExtra("tapHome") != null) {
+                            Intent home = new Intent(Intent.ACTION_MAIN);
+                            home.addCategory(Intent.CATEGORY_HOME);
+                            home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                            ((ViewGroup) param.thisObject).getContext().startActivity(home);
+                        }
                     } catch (Throwable t) {
                         XposedBridge.log(TAG + "tap click: " + t);
                     }

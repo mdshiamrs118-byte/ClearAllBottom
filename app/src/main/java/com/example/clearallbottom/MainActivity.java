@@ -119,6 +119,11 @@ public class MainActivity extends Activity {
         slider(root, Prefs.K_LIFT, "Lift of back cards (Stack)", 0, 40, Prefs.D_LIFT, " dp", null);
         slider(root, Prefs.K_TILT, "Tilt angle (Cover flow)", 0, 80, Prefs.D_TILT, "\u00B0", null);
         toggle(root, Prefs.K_INVERT, "Invert tilt direction", Prefs.D_INVERT);
+        toggle(root, Prefs.K_FLAT, "Flat tilt, no 3D (use if side cards look black)", Prefs.D_FLAT);
+
+        // ----- Touch -----
+        heading(root, "Touch");
+        toggle(root, Prefs.K_TAP_HOME, "Tap empty space to go home", Prefs.D_TAP_HOME);
 
         // ----- Clear all -----
         heading(root, "Clear all button");

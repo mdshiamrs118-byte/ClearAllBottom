@@ -24,6 +24,8 @@ public final class Prefs {
     public static final String K_DEPTH = "depth";
     public static final String K_LIFT = "lift_dp";
     public static final String K_INVERT = "invert_tilt";
+    public static final String K_FLAT = "flat_tilt";
+    public static final String K_TAP_HOME = "tap_home";
     public static final String K_PIN = "pin_clear_all";
     public static final String K_CLEAR_BOTTOM = "clear_bottom_dp";
 
@@ -39,6 +41,8 @@ public final class Prefs {
     public static final int D_DEPTH = 3;
     public static final int D_LIFT = 10;
     public static final boolean D_INVERT = false;
+    public static final boolean D_FLAT = false;
+    public static final boolean D_TAP_HOME = true;
     public static final boolean D_PIN = true;
     public static final int D_CLEAR_BOTTOM = 72;
 }
