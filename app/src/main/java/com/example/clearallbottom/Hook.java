@@ -296,7 +296,10 @@ public class Hook implements IXposedHookLoadPackage {
 
             for (View c : cards) {
                 float layoutCenter = c.getLeft() + c.getWidth() / 2f;
-                float t = (layoutCenter - rv.getScrollX() - rvCenter) / step;
+                float tLayout = (layoutCenter - rv.getScrollX() - rvCenter) / step;
+                // Include the launcher's own horizontal translation (e.g. the gap-closing
+                // slide after a dismiss) so our layout follows where the card would really be.
+                float t = tLayout + baseTx(c) / step;
                 float tt = Math.abs(t);
                 float s = Math.signum(t);
                 // sort key: ascending = back to front
@@ -352,8 +355,8 @@ public class Hook implements IXposedHookLoadPackage {
                     default:
                         break;
                 }
-                float dx = visual - t * step;
-                applyCard(c, scale * sizeX * squeeze, scale * sizeY, dx, dy + yOff, alpha, rot, density);
+                float txAbs = visual - tLayout * step; // absolute translation to reach 'visual'
+                applyCard(c, scale * sizeX * squeeze, scale * sizeY, txAbs, dy + yOff, alpha, rot, density);
                 applyRadius(c, density);
             }
         }
@@ -379,6 +382,12 @@ public class Hook implements IXposedHookLoadPackage {
         return order;
     }
 
+    /** The launcher's own translationX for a card, ignoring what we wrote. */
+    private static float baseTx(View v) {
+        float[] s = STATE.get(v);
+        return (s != null && v.getTranslationX() == s[4]) ? s[5] : v.getTranslationX();
+    }
+
     /** Sets scale/translation/alpha as (launcher's own value) combined with our effect. */
     private static void applyCard(View v, float sx, float sy, float dx, float dy,
                                   float alpha, float rot, float density) {
@@ -397,7 +406,7 @@ public class Hook implements IXposedHookLoadPackage {
 
         v.setScaleX(bSX * sx);
         v.setScaleY(bSY * sy);
-        v.setTranslationX(bTX + dx);
+        v.setTranslationX(dx); // absolute (already includes the launcher's own translation)
         v.setTranslationY(bTY + dy);
         v.setAlpha(bA * alpha);
         if (rot != 0f) {
