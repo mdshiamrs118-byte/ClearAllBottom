@@ -89,6 +89,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile String token = null;
     private static boolean clearHookOk = false;
     private static long lastClearAt = 0L;
+    private static boolean clearing = false;
     private static boolean lastClearHandled = false;
     /** Locks changed from the popup in this launcher session (pkg -> locked). */
     private static final Map<String, Boolean> OVERRIDES = new ConcurrentHashMap<>();
@@ -1131,34 +1132,71 @@ public class Hook implements IXposedHookLoadPackage {
             return false; // nothing protected on screen: stock clear-all removes everything
         }
 
-        Object amw = null;
+        sendClean(ctx, pkgs);
+        lastClearHandled = true;
+        if (!clearing) {
+            clearing = true;
+            clearUnprotected(rv, 0);
+        }
+        return true;
+    }
+
+    /**
+     * Dismisses every unlocked card. The launcher can lose some of its dismiss animations when
+     * many start at once, so we check afterwards and go again for whatever is left.
+     */
+    private static void clearUnprotected(final ViewGroup rv, final int attempt) {
+        try {
+            Set<String> prot = effectiveProtected();
+            List<View> targets = new ArrayList<>();
+            List<Integer> ids = new ArrayList<>();
+            for (int i = 0; i < rv.getChildCount(); i++) {
+                View c = rv.getChildAt(i);
+                if (!c.getClass().getName().endsWith("TaskView")) continue;
+                Object[] info = taskInfo(c);
+                if (info == null || info[0] == null) continue; // unknown: keep, to be safe
+                if (prot.contains((String) info[0])) continue;
+                targets.add(c);
+                ids.add((Integer) info[1]);
+            }
+            if (targets.isEmpty() || attempt >= 6) {
+                clearing = false;
+                return;
+            }
+            for (int i = 0; i < targets.size(); i++) {
+                boolean done = false;
+                if (attempt < 3) {
+                    try {
+                        XposedHelpers.callMethod(rv, "dismissTask", targets.get(i), true, true);
+                        done = true;
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + "dismissTask: " + t);
+                    }
+                }
+                if (!done) removeTaskViaAm(rv, ids.get(i));
+            }
+            rv.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    clearUnprotected(rv, attempt + 1);
+                }
+            }, attempt == 0 ? 560L : 450L);
+        } catch (Throwable t) {
+            clearing = false;
+            XposedBridge.log(TAG + "clearUnprotected: " + t);
+        }
+    }
+
+    private static void removeTaskViaAm(ViewGroup rv, int taskId) {
         try {
             Class<?> k = XposedHelpers.findClass(
                     "com.android.systemui.shared.system.ActivityManagerWrapper",
                     rv.getClass().getClassLoader());
-            amw = XposedHelpers.callStaticMethod(k, "getInstance");
+            Object amw = XposedHelpers.callStaticMethod(k, "getInstance");
+            XposedHelpers.callMethod(amw, "removeTask", taskId);
         } catch (Throwable t) {
-            // fine, dismissTask is tried first anyway
+            XposedBridge.log(TAG + "removeTask: " + t);
         }
-        for (int i = 0; i < removeViews.size(); i++) {
-            boolean done = false;
-            try {
-                XposedHelpers.callMethod(rv, "dismissTask", removeViews.get(i), true, true);
-                done = true;
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + "dismissTask: " + t);
-            }
-            if (!done && amw != null) {
-                try {
-                    XposedHelpers.callMethod(amw, "removeTask", removeIds.get(i));
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + "removeTask: " + t);
-                }
-            }
-        }
-        sendClean(ctx, pkgs);
-        lastClearHandled = true;
-        return true;
     }
 
     private static void sendClean(Context ctx, Collection<String> pkgs) {
