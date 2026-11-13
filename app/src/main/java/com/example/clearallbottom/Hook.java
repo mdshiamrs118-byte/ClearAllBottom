@@ -1,5 +1,8 @@
 package com.example.clearallbottom;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.ColorStateList;
@@ -20,6 +23,7 @@ import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.ViewParent;
 import android.view.ViewTreeObserver;
+import android.view.animation.LinearInterpolator;
 import android.view.WindowInsets;
 import android.widget.FrameLayout;
 import android.widget.TextView;
@@ -90,6 +94,14 @@ public class Hook implements IXposedHookLoadPackage {
     private static boolean clearHookOk = false;
     private static long lastClearAt = 0L;
     private static boolean clearing = false;
+    private static boolean glidePending = false;
+    private static View glideFocus;
+    private static final long FLY_MS = 260L;
+    private static final long GLIDE_MS = 280L;
+    /** Where the kept cards were drawn (center x) just before the cleared ones were removed. */
+    private static final WeakHashMap<View, Float> GLIDE_OLD = new WeakHashMap<>();
+    /** Per kept card: {offset to glide away, start time}. */
+    private static final WeakHashMap<View, float[]> GLIDE = new WeakHashMap<>();
     private static boolean lastClearHandled = false;
     /** Locks changed from the popup in this launcher session (pkg -> locked). */
     private static final Map<String, Boolean> OVERRIDES = new ConcurrentHashMap<>();
@@ -477,7 +489,8 @@ public class Hook implements IXposedHookLoadPackage {
                         break;
                 }
                 float txAbs = visual - tLayout * step; // absolute translation to reach 'visual'
-                applyCard(c, scale * curX * squeeze, scale * curY, txAbs, dy + yOff, alpha, rot, density);
+                applyCard(c, scale * curX * squeeze, scale * curY, txAbs + glideOffset(c, now), dy + yOff,
+                        alpha, rot, density);
                 applyRadius(c, density);
             }
         }
@@ -501,6 +514,21 @@ public class Hook implements IXposedHookLoadPackage {
         order.addAll(cards);
         if (clearAll != null) order.add(clearAll);
         return order;
+    }
+
+    /** Remaining horizontal glide (px) for a card that has to slide into its new spot. */
+    private static float glideOffset(View c, long now) {
+        float[] g = GLIDE.get(c);
+        if (g == null) return 0f;
+        float x = (now - (long) g[1]) / (float) GLIDE_MS;
+        if (x >= 1f) {
+            GLIDE.remove(c);
+            return 0f;
+        }
+        x = Math.max(0f, x);
+        float inv = 1f - x;
+        animating = true;
+        return g[0] * inv * inv * inv; // ease-out cubic
     }
 
     /** The launcher's own alpha for a card, ignoring what we wrote. */
@@ -836,6 +864,7 @@ public class Hook implements IXposedHookLoadPackage {
                     if (!shown && lastShown) RecentsPopup.dismiss();
                     lastShown = shown;
                     syncRam(rv, shown);
+                    if (glidePending && shown) prepareGlide(rv);
                     if (style != Prefs.STYLE_ORIGINAL && shown) {
                         refreshCfg();
                         buildOrder(rv, true);
@@ -1134,11 +1163,171 @@ public class Hook implements IXposedHookLoadPackage {
 
         sendClean(ctx, pkgs);
         lastClearHandled = true;
-        if (!clearing) {
+        if (!clearing && !removeViews.isEmpty()) {
             clearing = true;
-            clearUnprotected(rv, 0);
+            animatedClear(rv, removeViews, removeIds);
         }
         return true;
+    }
+
+    /**
+     * One clean motion: every unlocked card flies up and fades together, then they are
+     * removed in one go and the locked cards glide to their new place.
+     */
+    private static void animatedClear(final ViewGroup rv, final List<View> targets,
+                                      final List<Integer> ids) {
+        try {
+            final int n = targets.size();
+            final float h = Math.max(1f, rv.getHeight());
+            final float[] startTy = new float[n];
+            final float[] startA = new float[n];
+            for (int i = 0; i < n; i++) {
+                targets.get(i).animate().cancel();
+                startTy[i] = targets.get(i).getTranslationY();
+                startA[i] = targets.get(i).getAlpha();
+            }
+            final long stagger = 14L;
+            final long maxDelay = Math.min(n * stagger, 98L);
+            final long total = FLY_MS + maxDelay;
+            ValueAnimator va = ValueAnimator.ofFloat(0f, 1f);
+            va.setDuration(total);
+            va.setInterpolator(new LinearInterpolator());
+            va.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                @Override
+                public void onAnimationUpdate(ValueAnimator a) {
+                    long elapsed = (long) (a.getAnimatedFraction() * total);
+                    for (int i = 0; i < n; i++) {
+                        View c = targets.get(i);
+                        if (c.getParent() != rv) continue;
+                        long local = elapsed - Math.min(i * stagger, maxDelay);
+                        float p = Math.max(0f, Math.min(1f, local / (float) FLY_MS));
+                        c.setTranslationY(startTy[i] - h * 0.9f * p * p);
+                        c.setAlpha(startA[i] * (1f - Math.min(1f, p / 0.6f)));
+                    }
+                    rv.invalidate();
+                }
+            });
+            va.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    finishClear(rv, targets, ids);
+                }
+            });
+            va.start();
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "animatedClear: " + t);
+            clearUnprotected(rv, 0); // fallback: launcher's own dismiss, retried
+        }
+    }
+
+    private static void finishClear(final ViewGroup rv, List<View> targets, final List<Integer> ids) {
+        try {
+            List<View> keep = new ArrayList<>();
+            for (int i = 0; i < rv.getChildCount(); i++) {
+                View c = rv.getChildAt(i);
+                if (c.getClass().getName().endsWith("TaskView") && !targets.contains(c)
+                        && c.getVisibility() == View.VISIBLE && !skipped.contains(c)) {
+                    keep.add(c);
+                }
+            }
+            GLIDE_OLD.clear();
+            GLIDE.clear();
+            glideFocus = null;
+            float rvCenter = rv.getWidth() / 2f;
+            float best = Float.MAX_VALUE;
+            for (View c : keep) {
+                float center = c.getLeft() + c.getWidth() / 2f + c.getTranslationX() - rv.getScrollX();
+                GLIDE_OLD.put(c, center);
+                if (Math.abs(center - rvCenter) < best) {
+                    best = Math.abs(center - rvCenter);
+                    glideFocus = c;
+                }
+            }
+
+            for (View c : targets) {
+                c.animate().cancel();
+                try {
+                    XposedHelpers.callMethod(c, "resetViewTransforms");
+                } catch (Throwable ignored) {
+                }
+                c.setAlpha(1f);
+                c.setTranslationX(0f);
+                c.setTranslationY(0f);
+                c.setScaleX(1f);
+                c.setScaleY(1f);
+                c.setRotationY(0f);
+                if (LAYERED.remove(c)) c.setLayerType(View.LAYER_TYPE_NONE, null);
+                STATE.remove(c);
+                ANIM.remove(c);
+                skipped.remove(c);
+                if (c.getParent() == rv) rv.removeView(c);
+            }
+            boolean anyLeft = false;
+            for (int i = 0; i < rv.getChildCount(); i++) {
+                if (rv.getChildAt(i).getClass().getName().endsWith("TaskView")) anyLeft = true;
+            }
+            glidePending = anyLeft;
+            rv.requestLayout();
+            rv.invalidate();
+
+            final ClassLoader cl = rv.getClass().getClassLoader();
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Class<?> k = XposedHelpers.findClass(
+                                "com.android.systemui.shared.system.ActivityManagerWrapper", cl);
+                        Object amw = XposedHelpers.callStaticMethod(k, "getInstance");
+                        for (Integer id : ids) {
+                            try {
+                                XposedHelpers.callMethod(amw, "removeTask", id);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + "removeTask: " + t);
+                            }
+                        }
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + "removeTasks: " + t);
+                    }
+                }
+            }).start();
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "finishClear: " + t);
+        } finally {
+            clearing = false;
+        }
+    }
+
+    /** First frame after the removal: settle the scroll and set up the glide of the kept cards. */
+    private static void prepareGlide(ViewGroup rv) {
+        glidePending = false;
+        try {
+            View focus = glideFocus;
+            int idx = focus != null ? rv.indexOfChild(focus) : -1;
+            try {
+                if (idx >= 0) XposedHelpers.callMethod(rv, "snapToPageImmediately", idx);
+                else XposedHelpers.callMethod(rv, "updateCurrentPageScroll");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + "snap: " + t);
+            }
+            if (style == Prefs.STYLE_ORIGINAL) {
+                GLIDE_OLD.clear();
+                return; // stock layout: no glide (the style code isn't active)
+            }
+            buildOrder(rv, true); // positions with the new layout, no glide yet
+            long now = SystemClock.uptimeMillis();
+            for (Map.Entry<View, Float> e : new ArrayList<>(GLIDE_OLD.entrySet())) {
+                View c = e.getKey();
+                if (c == null || c.getParent() != rv) continue;
+                float nc = c.getLeft() + c.getWidth() / 2f + c.getTranslationX() - rv.getScrollX();
+                float delta = e.getValue() - nc;
+                if (Math.abs(delta) > 1f) GLIDE.put(c, new float[]{delta, now});
+            }
+            GLIDE_OLD.clear();
+            buildOrder(rv, true); // apply the starting offset right away
+            rv.postInvalidateOnAnimation();
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "prepareGlide: " + t);
+        }
     }
 
     /**
